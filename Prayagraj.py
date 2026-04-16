@@ -316,18 +316,6 @@ def generate_aging_summary(df, group_col):
 
 def main():
     st.title("📊 Prayagraj DSP Dashboard")
-    
-    # --- TEMPORARY DEBUG BLOCK ---
-    with st.expander("🚨 DEBUG: View Category Mapping Engine", expanded=True):
-        st.write("1. Testing Google Sheet Connection...")
-        test_map = load_category_mapping()
-        if test_map:
-            st.success(f"Successfully loaded {len(test_map)} mappings.")
-            st.write("2. Here is the exact dictionary the app is using:")
-            st.json(test_map)
-        else:
-            st.error("The mapping dictionary is completely empty!")
-    # -----------------------------
     st.markdown("---")
     
     st.sidebar.header("📂 Data Source")
