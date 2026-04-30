@@ -52,9 +52,9 @@ def load_category_mapping():
         df = pd.read_csv(SUBCATEGORY_SHEET_URL)
         if df.empty or len(df.columns) < 2: return {}
         
-        # --- FIX: Swapped the column assignments ---
-        col_main = df.columns[0] # Column A is the Main Category
-        col_sub = df.columns[1]  # Column B is the Subcategory
+        # Column A is the Main Category, Column B is the Subcategory
+        col_main = df.columns[0] 
+        col_sub = df.columns[1]  
         
         mapping = {}
         for _, row in df.iterrows():
@@ -90,25 +90,29 @@ def load_authorized_surveyors():
 def process_single_roster_sheet(url, sheet_name, sup_col, mgr_col):
     try:
         roster_df = pd.read_csv(url)
-        roster_df.columns = roster_df.columns.astype(str).str.strip()
+        # Clean up column names: remove extra spaces and hidden newlines
+        roster_df.columns = roster_df.columns.astype(str).str.strip().str.replace('\n', ' ')
         
-        if 'Ward no.' in roster_df.columns and COL_WARD in roster_df.columns:
-            roster_df = roster_df.drop(columns=[COL_WARD])
-        if 'Ward no.' in roster_df.columns:
-            roster_df = roster_df.rename(columns={'Ward no.': COL_WARD})
+        # 1. Aggressively find the 'Zone' column
+        zone_matches = [c for c in roster_df.columns if 'zone' in c.lower()]
+        if zone_matches:
+            roster_df = roster_df.rename(columns={zone_matches[0]: 'Zone'})
             
+        # 2. Aggressively find the 'Ward' column
+        ward_matches = [c for c in roster_df.columns if 'ward' in c.lower()]
+        if ward_matches:
+            roster_df = roster_df.rename(columns={ward_matches[0]: COL_WARD})
+            
+        # 3. Aggressively map Supervisor and Manager columns
+        for col in roster_df.columns:
+            if 'super' in col.lower() or sup_col.lower() in col.lower():
+                roster_df = roster_df.rename(columns={col: 'Standard_Supervisor'})
+            if mgr_col.lower() in col.lower() or 'je' in col.lower() or 'sfi' in col.lower():
+                roster_df = roster_df.rename(columns={col: 'Standard_Manager'})
+                
+        # Drop duplicated columns if any exist
         roster_df = roster_df.loc[:, ~roster_df.columns.duplicated()].copy()
-        
-        if COL_WARD in roster_df.columns and isinstance(roster_df[COL_WARD], pd.DataFrame):
-            roster_df[COL_WARD] = roster_df[COL_WARD].iloc[:, 0]
-        if 'Zone' in roster_df.columns and isinstance(roster_df['Zone'], pd.DataFrame):
-            roster_df['Zone'] = roster_df['Zone'].iloc[:, 0]
-            
-        if sup_col in roster_df.columns:
-            roster_df = roster_df.rename(columns={sup_col: 'Standard_Supervisor'})
-        if mgr_col in roster_df.columns:
-            roster_df = roster_df.rename(columns={mgr_col: 'Standard_Manager'})
-            
+                
         return roster_df
     except Exception as e:
         st.error(f"⚠️ Could not load {sheet_name} Officer Roster. Error: {e}")
@@ -117,7 +121,12 @@ def process_single_roster_sheet(url, sheet_name, sup_col, mgr_col):
 @st.cache_data(ttl=600)
 def load_officer_roster():
     civil_df = process_single_roster_sheet(CIVIL_SHEET_URL, "Civil", "Supervisor Name", "JE Name")
+    if not civil_df.empty and 'Department' not in civil_df.columns:
+        civil_df['Department'] = 'civil'
+        
     sanitation_df = process_single_roster_sheet(SANITATION_SHEET_URL, "Sanitation", "Supervisor Name", "SFI Name")
+    if not sanitation_df.empty and 'Department' not in sanitation_df.columns:
+        sanitation_df['Department'] = 'sanitation'
     
     combined_roster = pd.concat([civil_df, sanitation_df], ignore_index=True)
     
@@ -164,7 +173,8 @@ def process_data(df):
     else:
         df['MainCategory'] = "Uncategorized"
         
-    df = df.dropna(subset=['MainCategory']).copy()
+    # Tag unmapped categories instead of deleting them
+    df['MainCategory'] = df['MainCategory'].fillna("Unmapped Category")
     df['Subcategory_Clean'] = df[COL_SUBCATEGORY].astype(str).str.strip().str.title()
     
     # --- Dynamic Surveyor Rationalization & Filtering ---
@@ -173,7 +183,8 @@ def process_data(df):
         if surv_map:
             df['Surv_Clean'] = df[COL_SURVEYOR].apply(clean_text)
             df['Rationalised_Surveyor'] = df['Surv_Clean'].map(surv_map)
-            df = df.dropna(subset=['Rationalised_Surveyor']).copy()
+            # Tag unmapped surveyors instead of deleting them
+            df['Rationalised_Surveyor'] = df['Rationalised_Surveyor'].fillna("Unmapped Surveyor")
             df[COL_SURVEYOR] = df['Rationalised_Surveyor']
         else:
             df[COL_SURVEYOR] = df[COL_SURVEYOR].astype(str).str.strip()
@@ -185,25 +196,48 @@ def process_data(df):
     
     if not roster_df.empty and 'Zone' in roster_df.columns and COL_WARD in roster_df.columns and 'Department' in roster_df.columns:
         
-        def normalize_zone(z):
-            return str(z).strip().lower()
+        # --- SMART ID EXTRACTION LOGIC ---
+        def extract_zone_ward(val, col_type):
+            v_str = str(val).lower()
+            if pd.isna(val) or v_str == 'nan':
+                return 'unknown'
+            
+            # If looking for a Ward, grab ONLY the numbers immediately after the word "ward"
+            if col_type == "ward" and "ward" in v_str:
+                match = re.search(r'ward\s*\D*(\d+)', v_str)
+                if match: return str(int(match.group(1)))
+                
+            # If looking for a Zone, grab ONLY the numbers immediately after the word "zone"
+            if col_type == "zone" and "zone" in v_str:
+                match = re.search(r'zone\s*\D*(\d+)', v_str)
+                if match: return str(int(match.group(1)))
+            
+            # Fallback: Just grab the absolute first number found anywhere in the string
+            match = re.search(r'\d+', v_str)
+            if match:
+                return str(int(match.group()))
+                
+            return v_str.strip()
 
         if COL_ZONE in df.columns:
-            df['Match_Zone'] = df[COL_ZONE].apply(normalize_zone)
+            df['Match_Zone'] = df[COL_ZONE].apply(lambda x: extract_zone_ward(x, 'zone'))
         else:
             df['Match_Zone'] = 'unknown'
             
-        df['Match_Ward'] = df[COL_WARD].astype(str).str.replace(r'\.0$', '', regex=True).str.strip().str.lower()
-        df['Match_Dept'] = df['MainCategory'].apply(lambda x: 'civil' if str(x).lower() in ['civil', 'malba'] else 'sanitation')
+        df['Match_Ward'] = df[COL_WARD].apply(lambda x: extract_zone_ward(x, 'ward'))
         
-        roster_df['Match_Zone'] = roster_df['Zone'].apply(normalize_zone)
-        roster_df['Match_Ward'] = roster_df[COL_WARD].astype(str).str.replace(r'\.0$', '', regex=True).str.strip().str.lower()
+        # Route Engineering to Civil
+        df['Match_Dept'] = df['MainCategory'].apply(lambda x: 'civil' if str(x).lower() in ['civil', 'engineering', 'malba'] else 'sanitation')
+        
+        roster_df['Match_Zone'] = roster_df['Zone'].apply(lambda x: extract_zone_ward(x, 'zone'))
+        roster_df['Match_Ward'] = roster_df[COL_WARD].apply(lambda x: extract_zone_ward(x, 'ward'))
         
         def clean_dept_roster(d):
             d = str(d).lower()
             if 'san' in d: return 'sanitation'
             if 'civ' in d: return 'civil'
-            if 'malba' in d: return 'civil' # Route Malba to Civil roster
+            if 'malba' in d: return 'civil' 
+            if 'eng' in d: return 'civil'   
             return d.strip()
             
         roster_df['Match_Dept'] = roster_df['Department'].apply(clean_dept_roster)
@@ -427,12 +461,16 @@ def main():
 
             elif st.session_state.current_view == "Subcategory Drill-Down":
                 st.subheader("🔍 Subcategory Drill-Down")
-                tabs = st.tabs(main_categories)
-                for tab, main_cat in zip(tabs, main_categories):
-                    with tab:
-                        sub_df = df_processed[df_processed['MainCategory'] == main_cat]
-                        if not sub_df.empty:
-                            display_with_fixed_footer(generate_pivot_summary(sub_df, 'Subcategory_Clean', f"{main_cat} Total"))
+                
+                if not main_categories:
+                    st.warning("⚠️ No valid main categories found. Check the raw data mapping.")
+                else:
+                    tabs = st.tabs(main_categories)
+                    for tab, main_cat in zip(tabs, main_categories):
+                        with tab:
+                            sub_df = df_processed[df_processed['MainCategory'] == main_cat]
+                            if not sub_df.empty:
+                                display_with_fixed_footer(generate_pivot_summary(sub_df, 'Subcategory_Clean', f"{main_cat} Total"))
 
                 # ==========================================
                 # TICKET INSPECTOR (DEEP DIVE)
@@ -520,11 +558,14 @@ def main():
                     unresolved_df = df_processed[df_processed['StatusBucket'].isin(UNRESOLVED_STATUSES)].copy()
                     ignore_list = ['Unassigned', 'Roster Unavailable', 'Column Missing']
                     
-                    unmapped_df = unresolved_df[unresolved_df['Supervisor'].isin(ignore_list)]
+                    unmapped_df = unresolved_df[
+                        (unresolved_df['Supervisor'].isin(ignore_list)) & 
+                        (unresolved_df['SFI/JE'].isin(ignore_list))
+                    ]
                     unmapped_count = unmapped_df.shape[0]
                     
                     if unmapped_count > 0:
-                        st.error(f"⚠️ **{unmapped_count} unresolved tickets** could not be mapped to an officer because the Zone/Ward/Dept combination does not match either Google Sheet. They are hidden from this leaderboard.")
+                        st.error(f"⚠️ **{unmapped_count} unresolved tickets** could not be mapped to ANY officer. They are hidden from this leaderboard.")
                         
                         csv = unmapped_df.to_csv(index=False).encode('utf-8')
                         st.download_button(
@@ -535,26 +576,23 @@ def main():
                             type="secondary"
                         )
                     
-                    valid_unresolved = unresolved_df[
-                        (~unresolved_df['Supervisor'].isin(ignore_list)) & 
-                        (~unresolved_df['SFI/JE'].isin(ignore_list))
-                    ]
-                    
-                    sanitation_df = valid_unresolved[valid_unresolved['MainCategory'] == 'Sanitation']
-                    civil_df = valid_unresolved[valid_unresolved['MainCategory'] == 'Civil']
-                    malba_df = valid_unresolved[valid_unresolved['MainCategory'] == 'Malba']
+                    sanitation_df = unresolved_df[unresolved_df['MainCategory'] == 'Sanitation']
+                    eng_df = unresolved_df[unresolved_df['MainCategory'] == 'Engineering']
+                    malba_df = unresolved_df[unresolved_df['MainCategory'] == 'Malba']
                     
                     st.markdown("### 🥇 Top & Bottom 5 Performers")
                     st.caption("Ranked by lowest and highest number of currently unresolved tickets.")
                     
-                    t1, t2, t3 = st.tabs(["🧹 Sanitation", "🏗️ Civil", "🚜 Malba"])
+                    t1, t2, t3 = st.tabs(["🧹 Sanitation", "🏗️ Engineering", "🚜 Malba"])
                     
                     def draw_leaderboard(df_to_use, group_col, role_label):
-                        if df_to_use.empty:
+                        clean_df = df_to_use[~df_to_use[group_col].isin(ignore_list)]
+                        
+                        if clean_df.empty:
                             st.info(f"No unresolved tickets found for {role_label}s in this category.")
                             return
                         
-                        counts = df_to_use.groupby(group_col).size().reset_index(name='Total Unresolved Tickets')
+                        counts = clean_df.groupby(group_col).size().reset_index(name='Total Unresolved Tickets')
                         counts = counts.sort_values('Total Unresolved Tickets', ascending=True).reset_index(drop=True)
                         counts.columns = [f"{role_label} Name", 'Total Unresolved Tickets']
                         
@@ -579,17 +617,11 @@ def main():
                         draw_leaderboard(sanitation_df, 'SFI/JE', 'SFI')
                         
                     with t2:
-                        st.markdown("##### 👷 Supervisors")
-                        draw_leaderboard(civil_df, 'Supervisor', 'Supervisor')
-                        st.markdown("<br>", unsafe_allow_html=True)
-                        st.markdown("##### 👔 JEs")
-                        draw_leaderboard(civil_df, 'SFI/JE', 'JE')
+                        st.markdown("##### 👔 Junior Engineers (JEs)")
+                        draw_leaderboard(eng_df, 'SFI/JE', 'JE')
 
                     with t3:
-                        st.markdown("##### 👷 Supervisors")
-                        draw_leaderboard(malba_df, 'Supervisor', 'Supervisor')
-                        st.markdown("<br>", unsafe_allow_html=True)
-                        st.markdown("##### 👔 JEs")
+                        st.markdown("##### 👔 Junior Engineers (JEs)")
                         draw_leaderboard(malba_df, 'SFI/JE', 'JE')
                         
                     st.markdown("---")
@@ -603,11 +635,13 @@ def main():
                         f_zone = "All"
                     with f3: role_type = st.radio("Select Role to Inspect", ["Supervisor", "SFI / JE"], horizontal=True)
                     
-                    filt_df = valid_unresolved.copy()
+                    filt_df = unresolved_df.copy()
                     if f_cat != "All": filt_df = filt_df[filt_df['MainCategory'] == f_cat]
                     if f_zone != "All" and COL_ZONE in filt_df.columns: filt_df = filt_df[filt_df[COL_ZONE] == f_zone]
                     
                     target_col = 'Supervisor' if role_type == "Supervisor" else 'SFI/JE'
+                    
+                    filt_df = filt_df[~filt_df[target_col].isin(ignore_list)]
                     
                     if not filt_df.empty:
                         officer_list = ["All"] + sorted(filt_df[target_col].dropna().unique().tolist())
