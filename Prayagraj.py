@@ -4,6 +4,7 @@ from datetime import datetime
 import calendar
 import altair as alt
 import re
+import io
 
 # --- MUST BE THE FIRST STREAMLIT COMMAND ---
 st.set_page_config(page_title="Prayagraj DSP Dashboard", layout="wide", initial_sidebar_state="collapsed")
@@ -21,6 +22,8 @@ COL_WARD        = "Ward"
 COL_BEFORE_IMG  = "Upload Documents"
 COL_AFTER_IMG   = "Resolved Documents"
 COL_SURVEYOR    = "Surveyor Name"
+COL_RESOLVER    = "Resolver Name"
+COL_ADDRESS     = "Registration Location" 
 
 # --- Google Sheet URLs (Converted for CSV Export) ---
 CIVIL_SHEET_URL = "https://docs.google.com/spreadsheets/d/1i1ZxGO3Tz1it45wGfU_wwjHnCiReCXQzitYYOghLF28/export?format=csv&gid=0"
@@ -47,15 +50,11 @@ def clean_text(text):
 
 @st.cache_data(ttl=600)
 def load_category_mapping():
-    """Fetches subcategory to main category mapping from Google Sheets."""
     try:
         df = pd.read_csv(SUBCATEGORY_SHEET_URL)
         if df.empty or len(df.columns) < 2: return {}
-        
-        # Column A is the Main Category, Column B is the Subcategory
         col_main = df.columns[0] 
         col_sub = df.columns[1]  
-        
         mapping = {}
         for _, row in df.iterrows():
             k = clean_text(row[col_sub])
@@ -69,11 +68,9 @@ def load_category_mapping():
 
 @st.cache_data(ttl=600)
 def load_authorized_surveyors():
-    """Fetches raw to rationalized surveyor mapping and drops the rest."""
     try:
         df = pd.read_csv(SURVEYOR_LIST_SHEET_URL)
         if df.empty or len(df.columns) < 2: return {}
-        
         raw_col = df.columns[0]
         rat_col = df.columns[1]
         mapping = {}
@@ -90,29 +87,21 @@ def load_authorized_surveyors():
 def process_single_roster_sheet(url, sheet_name, sup_col, mgr_col):
     try:
         roster_df = pd.read_csv(url)
-        # Clean up column names: remove extra spaces and hidden newlines
         roster_df.columns = roster_df.columns.astype(str).str.strip().str.replace('\n', ' ')
         
-        # 1. Aggressively find the 'Zone' column
         zone_matches = [c for c in roster_df.columns if 'zone' in c.lower()]
-        if zone_matches:
-            roster_df = roster_df.rename(columns={zone_matches[0]: 'Zone'})
+        if zone_matches: roster_df = roster_df.rename(columns={zone_matches[0]: 'Zone'})
             
-        # 2. Aggressively find the 'Ward' column
         ward_matches = [c for c in roster_df.columns if 'ward' in c.lower()]
-        if ward_matches:
-            roster_df = roster_df.rename(columns={ward_matches[0]: COL_WARD})
+        if ward_matches: roster_df = roster_df.rename(columns={ward_matches[0]: COL_WARD})
             
-        # 3. Aggressively map Supervisor and Manager columns
         for col in roster_df.columns:
             if 'super' in col.lower() or sup_col.lower() in col.lower():
                 roster_df = roster_df.rename(columns={col: 'Standard_Supervisor'})
             if mgr_col.lower() in col.lower() or 'je' in col.lower() or 'sfi' in col.lower():
                 roster_df = roster_df.rename(columns={col: 'Standard_Manager'})
                 
-        # Drop duplicated columns if any exist
         roster_df = roster_df.loc[:, ~roster_df.columns.duplicated()].copy()
-                
         return roster_df
     except Exception as e:
         st.error(f"⚠️ Could not load {sheet_name} Officer Roster. Error: {e}")
@@ -121,18 +110,14 @@ def process_single_roster_sheet(url, sheet_name, sup_col, mgr_col):
 @st.cache_data(ttl=600)
 def load_officer_roster():
     civil_df = process_single_roster_sheet(CIVIL_SHEET_URL, "Civil", "Supervisor Name", "JE Name")
-    if not civil_df.empty and 'Department' not in civil_df.columns:
-        civil_df['Department'] = 'civil'
+    if not civil_df.empty and 'Department' not in civil_df.columns: civil_df['Department'] = 'civil'
         
     sanitation_df = process_single_roster_sheet(SANITATION_SHEET_URL, "Sanitation", "Supervisor Name", "SFI Name")
-    if not sanitation_df.empty and 'Department' not in sanitation_df.columns:
-        sanitation_df['Department'] = 'sanitation'
+    if not sanitation_df.empty and 'Department' not in sanitation_df.columns: sanitation_df['Department'] = 'sanitation'
     
     combined_roster = pd.concat([civil_df, sanitation_df], ignore_index=True)
-    
     if COL_WARD in combined_roster.columns:
         combined_roster[COL_WARD] = combined_roster[COL_WARD].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
-        
     return combined_roster
 
 def display_with_fixed_footer(df, show_closure=True):
@@ -143,10 +128,8 @@ def display_with_fixed_footer(df, show_closure=True):
     total = df.iloc[[-1]]
     
     config = {}
-    if show_closure and '% Closure' in df.columns:
-        config['% Closure'] = st.column_config.NumberColumn(format="%.1f%%")
-    if 'Avg Closure Time (Days)' in df.columns:
-        config['Avg Closure Time (Days)'] = st.column_config.NumberColumn(format="%.1f")
+    if show_closure and '% Closure' in df.columns: config['% Closure'] = st.column_config.NumberColumn(format="%.1f%%")
+    if 'Avg Closure Time (Days)' in df.columns: config['Avg Closure Time (Days)'] = st.column_config.NumberColumn(format="%.1f")
         
     st.dataframe(body, use_container_width=True, column_config=config)
     st.markdown("⬇️ **Grand Total**") 
@@ -164,69 +147,43 @@ def process_data(df):
     if COL_WARD in df.columns:
         df[COL_WARD] = df[COL_WARD].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
         
-    # --- Dynamic Category Mapping ---
+    # --- Category Mapping ---
     cat_map = load_category_mapping()
     df['Subcategory_Clean'] = df[COL_SUBCATEGORY].apply(clean_text)
-    
-    if cat_map:
-        df['MainCategory'] = df['Subcategory_Clean'].map(cat_map)
-    else:
-        df['MainCategory'] = "Uncategorized"
-        
-    # Tag unmapped categories instead of deleting them
+    df['MainCategory'] = df['Subcategory_Clean'].map(cat_map) if cat_map else "Uncategorized"
     df['MainCategory'] = df['MainCategory'].fillna("Unmapped Category")
     df['Subcategory_Clean'] = df[COL_SUBCATEGORY].astype(str).str.strip().str.title()
     
-    # --- Dynamic Surveyor Rationalization & Filtering ---
+    # --- Surveyor Rationalization ---
     if COL_SURVEYOR in df.columns:
         surv_map = load_authorized_surveyors()
         if surv_map:
             df['Surv_Clean'] = df[COL_SURVEYOR].apply(clean_text)
-            df['Rationalised_Surveyor'] = df['Surv_Clean'].map(surv_map)
-            # Tag unmapped surveyors instead of deleting them
-            df['Rationalised_Surveyor'] = df['Rationalised_Surveyor'].fillna("Unmapped Surveyor")
+            df['Rationalised_Surveyor'] = df['Surv_Clean'].map(surv_map).fillna("Unmapped Surveyor")
             df[COL_SURVEYOR] = df['Rationalised_Surveyor']
         else:
             df[COL_SURVEYOR] = df[COL_SURVEYOR].astype(str).str.strip()
 
-    # ==========================================
-    # --- FOOLPROOF ROSTER MERGE ---
-    # ==========================================
+    # --- ROSTER MERGE ---
     roster_df = load_officer_roster()
     
     if not roster_df.empty and 'Zone' in roster_df.columns and COL_WARD in roster_df.columns and 'Department' in roster_df.columns:
         
-        # --- SMART ID EXTRACTION LOGIC ---
         def extract_zone_ward(val, col_type):
             v_str = str(val).lower()
-            if pd.isna(val) or v_str == 'nan':
-                return 'unknown'
-            
-            # If looking for a Ward, grab ONLY the numbers immediately after the word "ward"
+            if pd.isna(val) or v_str == 'nan': return 'unknown'
             if col_type == "ward" and "ward" in v_str:
                 match = re.search(r'ward\s*\D*(\d+)', v_str)
                 if match: return str(int(match.group(1)))
-                
-            # If looking for a Zone, grab ONLY the numbers immediately after the word "zone"
             if col_type == "zone" and "zone" in v_str:
                 match = re.search(r'zone\s*\D*(\d+)', v_str)
                 if match: return str(int(match.group(1)))
-            
-            # Fallback: Just grab the absolute first number found anywhere in the string
             match = re.search(r'\d+', v_str)
-            if match:
-                return str(int(match.group()))
-                
+            if match: return str(int(match.group()))
             return v_str.strip()
 
-        if COL_ZONE in df.columns:
-            df['Match_Zone'] = df[COL_ZONE].apply(lambda x: extract_zone_ward(x, 'zone'))
-        else:
-            df['Match_Zone'] = 'unknown'
-            
+        df['Match_Zone'] = df[COL_ZONE].apply(lambda x: extract_zone_ward(x, 'zone')) if COL_ZONE in df.columns else 'unknown'
         df['Match_Ward'] = df[COL_WARD].apply(lambda x: extract_zone_ward(x, 'ward'))
-        
-        # Route Engineering to Civil
         df['Match_Dept'] = df['MainCategory'].apply(lambda x: 'civil' if str(x).lower() in ['civil', 'engineering', 'malba'] else 'sanitation')
         
         roster_df['Match_Zone'] = roster_df['Zone'].apply(lambda x: extract_zone_ward(x, 'zone'))
@@ -235,9 +192,7 @@ def process_data(df):
         def clean_dept_roster(d):
             d = str(d).lower()
             if 'san' in d: return 'sanitation'
-            if 'civ' in d: return 'civil'
-            if 'malba' in d: return 'civil' 
-            if 'eng' in d: return 'civil'   
+            if 'civ' in d or 'malba' in d or 'eng' in d: return 'civil'   
             return d.strip()
             
         roster_df['Match_Dept'] = roster_df['Department'].apply(clean_dept_roster)
@@ -247,32 +202,29 @@ def process_data(df):
         if 'Standard_Manager' in roster_df.columns: cols_to_pull.append('Standard_Manager')
             
         roster_clean = roster_df[cols_to_pull].drop_duplicates(subset=['Match_Zone', 'Match_Ward', 'Match_Dept'])
-        
         df = pd.merge(df, roster_clean, on=['Match_Zone', 'Match_Ward', 'Match_Dept'], how='left')
         
-        if 'Standard_Supervisor' in df.columns:
-            df = df.rename(columns={'Standard_Supervisor': 'Supervisor'})
-        else:
-            df['Supervisor'] = 'Column Missing'
-            
-        if 'Standard_Manager' in df.columns:
-            df = df.rename(columns={'Standard_Manager': 'SFI/JE'})
-        else:
-            df['SFI/JE'] = 'Column Missing'
+        df['Supervisor'] = df['Standard_Supervisor'] if 'Standard_Supervisor' in df.columns else 'Column Missing'
+        df['SFI/JE'] = df['Standard_Manager'] if 'Standard_Manager' in df.columns else 'Column Missing'
             
         df['Supervisor'] = df['Supervisor'].fillna('Unassigned')
         df['SFI/JE'] = df['SFI/JE'].fillna('Unassigned')
         df = df.drop(columns=['Match_Zone', 'Match_Ward', 'Match_Dept'])
         
+        # --- NEW FALLBACK LOGIC ---
+        if COL_RESOLVER in df.columns:
+            df[COL_RESOLVER] = df[COL_RESOLVER].astype(str).replace('nan', '').str.strip()
+            je_mask = (df['SFI/JE'] == 'Unassigned') & (df[COL_RESOLVER] != '')
+            df.loc[je_mask, 'SFI/JE'] = df.loc[je_mask, COL_RESOLVER]
+            
     else:
         df['Supervisor'] = 'Roster Unavailable'
         df['SFI/JE'] = 'Roster Unavailable'
-    # ==========================================
     
+    # --- Status & Dates ---
     def get_bucket(status_name):
         s = str(status_name).strip().upper()
-        if s in STATUS_COLUMNS: return s
-        return "PENDING"
+        return s if s in STATUS_COLUMNS else "PENDING"
     df['StatusBucket'] = df[COL_STATUS].apply(get_bucket)
     
     df[COL_CREATED] = df[COL_CREATED].astype(str).str.strip()
@@ -285,7 +237,6 @@ def process_data(df):
         exact_resolved = pd.to_datetime(df[COL_RESOLVED], format='%m/%d/%Y %H:%M', errors='coerce')
         fallback_resolved = pd.to_datetime(df[COL_RESOLVED], dayfirst=False, errors='coerce')
         df[COL_RESOLVED] = exact_resolved.fillna(fallback_resolved)
-        
         df['ClosureTimeDays'] = (df[COL_RESOLVED] - df[COL_CREATED]).dt.days
         df['ClosureTimeDays'] = df['ClosureTimeDays'].apply(lambda x: x if pd.notna(x) and x >= 0 else None)
     else:
@@ -304,12 +255,31 @@ def process_data(df):
         else: return "> 1 Year"
     df['AgeBucket'] = df.apply(get_age_bucket, axis=1)
     
+    # --- LAT/LON EXTRACTION ---
+    loc_col = COL_ADDRESS if COL_ADDRESS in df.columns else next((col for col in df.columns if 'location' in col.lower()), None)
+    if loc_col:
+        def extract_lat_lon(val):
+            try:
+                match = re.search(r'([-+]?\d{1,2}\.\d+)\s*,\s*([-+]?\d{1,3}\.\d+)', str(val))
+                if match:
+                    lat, lon = float(match.group(1)), float(match.group(2))
+                    if -90 <= lat <= 90 and -180 <= lon <= 180: return lat, lon
+            except: pass
+            return None, None
+            
+        coords = df[loc_col].apply(extract_lat_lon)
+        df['latitude'] = coords.apply(lambda x: x[0] if x else None)
+        df['longitude'] = coords.apply(lambda x: x[1] if x else None)
+    else:
+        df['latitude'] = None
+        df['longitude'] = None
+        st.warning(f"⚠️ Could not find the '{COL_ADDRESS}' column.")
+    
     return df
 
 def generate_pivot_summary(df, group_col, label_suffix="Total", show_avg_time=False):
     if df.empty: return pd.DataFrame()
     summary = df.groupby([group_col, 'StatusBucket']).size().unstack(fill_value=0)
-    
     for col in STATUS_COLUMNS:
         if col not in summary.columns: summary[col] = 0
             
@@ -323,15 +293,12 @@ def generate_pivot_summary(df, group_col, label_suffix="Total", show_avg_time=Fa
 
     total_row_data = {col: summary[col].sum() for col in STATUS_COLUMNS + ['Unresolved Total', 'Grand Total']}
     total_row_data['% Closure'] = (total_row_data['CLOSED'] / total_row_data['Grand Total'] * 100) if total_row_data['Grand Total'] > 0 else 0
-    
     if show_avg_time and 'ClosureTimeDays' in df.columns:
         total_row_data['Avg Closure Time (Days)'] = df['ClosureTimeDays'].mean().round(1)
     
     total_row = pd.DataFrame([total_row_data], index=[f'**{label_suffix}**'])
-    
     cols_order = STATUS_COLUMNS + ['Unresolved Total', 'Grand Total', '% Closure']
     if show_avg_time and 'ClosureTimeDays' in df.columns: cols_order.append('Avg Closure Time (Days)')
-        
     return pd.concat([summary, total_row])[cols_order]
 
 def generate_aging_summary(df, group_col):
@@ -358,19 +325,12 @@ def main():
     st.sidebar.markdown("---")
     st.sidebar.header("🧭 Navigation")
     
-    if 'current_view' not in st.session_state:
-        st.session_state.current_view = "Main Category Summary"
+    if 'current_view' not in st.session_state: st.session_state.current_view = "Main Category Summary"
     
     views = [
-        "Main Category Summary",
-        "Subcategory Drill-Down",
-        "Zone-wise Drill-Down",
-        "Officer Leaderboard", 
-        "Age-wise Pendency",
-        "Monthly Trend Analysis",
-        "Custom Date Range Analysis",
-        "Quarterly Performance (FY)",
-        "Surveyor Performance"
+        "Main Category Summary", "Subcategory Drill-Down", "Zone-wise Drill-Down", "Geospatial Map",
+        "Officer Leaderboard", "Age-wise Pendency", "Monthly Trend Analysis",
+        "Custom Date Range Analysis", "Quarterly Performance (FY)", "Surveyor Performance"
     ]
     
     for view in views:
@@ -382,29 +342,23 @@ def main():
     if uploaded_file is not None:
         try:
             file_name = uploaded_file.name.lower()
-            if file_name.endswith('.csv'):
-                df_raw = pd.read_csv(uploaded_file, encoding='utf-8')
-            elif file_name.endswith('.xlsx'):
-                df_raw = pd.read_excel(uploaded_file, engine='openpyxl')
-            elif file_name.endswith('.xls'):
-                df_raw = pd.read_excel(uploaded_file, engine='xlrd')
+            if file_name.endswith('.csv'): df_raw = pd.read_csv(uploaded_file, encoding='utf-8')
+            elif file_name.endswith('.xlsx'): df_raw = pd.read_excel(uploaded_file, engine='openpyxl')
+            elif file_name.endswith('.xls'): df_raw = pd.read_excel(uploaded_file, engine='xlrd')
             else:
-                st.error("❌ Unsupported file format. Please upload a .csv or .xlsx file.")
+                st.error("❌ Unsupported file format.")
                 st.stop()
                 
             df_processed = process_data(df_raw)
             main_categories = sorted(df_processed['MainCategory'].unique().tolist())
             
             valid_created_years = df_processed[COL_CREATED].dt.year.dropna().unique().tolist()
-            valid_resolved_years = []
-            if COL_RESOLVED in df_processed.columns:
-                valid_resolved_years = df_processed[COL_RESOLVED].dt.year.dropna().unique().tolist()
+            valid_resolved_years = df_processed[COL_RESOLVED].dt.year.dropna().unique().tolist() if COL_RESOLVED in df_processed.columns else []
             all_years = sorted(list(set(valid_created_years + valid_resolved_years)), reverse=True)
 
             # ==========================================
-            # VIEWS
+            # MAIN CATEGORY SUMMARY
             # ==========================================
-            
             if st.session_state.current_view == "Main Category Summary":
                 st.subheader("📈 Main Category Summary")
                 summary_table = generate_pivot_summary(df_processed, 'MainCategory', "TOTAL")
@@ -441,8 +395,7 @@ def main():
                         zone_closed = df_processed[df_processed['StatusBucket'] == 'CLOSED'].groupby(COL_ZONE).size().rename("Total Closed")
                         zone_bar_df = pd.concat([zone_raised, zone_closed], axis=1).fillna(0).astype(int)
                         st.bar_chart(zone_bar_df, use_container_width=True)
-                    else:
-                        st.info(f"⚠️ '{COL_ZONE}' column not found in data.")
+                    else: st.info(f"⚠️ '{COL_ZONE}' column not found.")
                         
                 with c2:
                     st.markdown("**Citywide Status Breakdown**")
@@ -450,70 +403,66 @@ def main():
                     status_counts.columns = ['Status', 'Count']
                     pie_chart = alt.Chart(status_counts).mark_arc(innerRadius=40).encode(
                         theta=alt.Theta(field="Count", type="quantitative"),
-                        color=alt.Color(field="Status", type="nominal", 
-                                        scale=alt.Scale(
-                                            domain=STATUS_COLUMNS,
-                                            range=['#F59E0B', '#9CA3AF', '#10B981'] 
-                                        )),
+                        color=alt.Color(field="Status", type="nominal", scale=alt.Scale(domain=STATUS_COLUMNS, range=['#F59E0B', '#9CA3AF', '#10B981'])),
                         tooltip=['Status', 'Count']
                     ).properties(height=350)
                     st.altair_chart(pie_chart, use_container_width=True)
 
+            # ==========================================
+            # SUBCATEGORY DRILL-DOWN
+            # ==========================================
             elif st.session_state.current_view == "Subcategory Drill-Down":
                 st.subheader("🔍 Subcategory Drill-Down")
                 
                 if not main_categories:
-                    st.warning("⚠️ No valid main categories found. Check the raw data mapping.")
+                    st.warning("⚠️ No valid main categories found.")
                 else:
+                    st.markdown("##### 📅 View Settings")
+                    c1, c2 = st.columns([1, 2])
+                    with c1: use_date_sub = st.checkbox("Filter by Date Range", key="sub_date_check")
+                    with c2:
+                        if use_date_sub:
+                            min_date = df_processed[COL_CREATED].min().date()
+                            max_date = df_processed[COL_CREATED].max().date()
+                            sub_dates = st.date_input("Select Date Range", value=(min_date, max_date), min_value=min_date, max_value=max_date, key="sub_dates")
+                    
+                    st.markdown("---")
+                    
+                    sub_view_df = df_processed.copy()
+                    if use_date_sub and len(sub_dates) == 2:
+                        start_d, end_d = sub_dates
+                        sub_view_df = sub_view_df[(sub_view_df[COL_CREATED].dt.date >= start_d) & (sub_view_df[COL_CREATED].dt.date <= end_d)]
+                        st.caption(f"Showing tickets from **{start_d.strftime('%d %b %Y')}** to **{end_d.strftime('%d %b %Y')}**")
+
                     tabs = st.tabs(main_categories)
                     for tab, main_cat in zip(tabs, main_categories):
                         with tab:
-                            sub_df = df_processed[df_processed['MainCategory'] == main_cat]
-                            if not sub_df.empty:
-                                display_with_fixed_footer(generate_pivot_summary(sub_df, 'Subcategory_Clean', f"{main_cat} Total"))
+                            sub_df = sub_view_df[sub_view_df['MainCategory'] == main_cat]
+                            if not sub_df.empty: display_with_fixed_footer(generate_pivot_summary(sub_df, 'Subcategory_Clean', f"{main_cat} Total"))
+                            else: st.info(f"No tickets found for {main_cat} in this date range.")
 
-                # ==========================================
-                # TICKET INSPECTOR (DEEP DIVE)
-                # ==========================================
                 st.markdown("---")
                 st.subheader("🔎 Ticket Inspector (Deep Dive)")
-                st.caption("Use the filters below to pull up specific raw tickets based on the summary numbers above.")
-                
                 with st.expander("Click to Open Ticket Inspector", expanded=False):
                     f1, f2, f3 = st.columns(3)
-                    
-                    with f1:
-                        filter_cat = st.selectbox("1. Select Main Category", ["All"] + main_categories)
-                    
+                    with f1: filter_cat = st.selectbox("1. Select Main Category", ["All"] + main_categories)
                     with f2:
-                        if filter_cat == "All":
-                            available_subs = ["All"] + sorted(df_processed['Subcategory_Clean'].dropna().unique().tolist())
-                        else:
-                            available_subs = ["All"] + sorted(df_processed[df_processed['MainCategory'] == filter_cat]['Subcategory_Clean'].dropna().unique().tolist())
-                        filter_sub = st.selectbox("2. Select Subcategory", available_subs)
-                        
-                    with f3:
-                        filter_status = st.selectbox("3. Select Status", ["All"] + STATUS_COLUMNS)
+                        avail_subs = ["All"] + sorted(df_processed['Subcategory_Clean'].dropna().unique().tolist()) if filter_cat == "All" else ["All"] + sorted(df_processed[df_processed['MainCategory'] == filter_cat]['Subcategory_Clean'].dropna().unique().tolist())
+                        filter_sub = st.selectbox("2. Select Subcategory", avail_subs)
+                    with f3: filter_status = st.selectbox("3. Select Status", ["All"] + STATUS_COLUMNS)
                         
                     st.markdown("<br>", unsafe_allow_html=True)
-                    
                     d1, d2 = st.columns([1, 2])
-                    with d1:
-                        use_date = st.checkbox("📅 Filter by Date Range")
+                    with d1: use_date = st.checkbox("📅 Filter by Date Range")
                     with d2:
                         if use_date:
-                            min_date = df_processed[COL_CREATED].min().date()
-                            max_date = df_processed[COL_CREATED].max().date()
+                            min_date, max_date = df_processed[COL_CREATED].min().date(), df_processed[COL_CREATED].max().date()
                             filter_dates = st.date_input("4. Select Date Range", value=(min_date, max_date), min_value=min_date, max_value=max_date)
                         
                     deep_dive_df = df_processed.copy()
-                    if filter_cat != "All":
-                        deep_dive_df = deep_dive_df[deep_dive_df['MainCategory'] == filter_cat]
-                    if filter_sub != "All":
-                        deep_dive_df = deep_dive_df[deep_dive_df['Subcategory_Clean'] == filter_sub]
-                    if filter_status != "All":
-                        deep_dive_df = deep_dive_df[deep_dive_df['StatusBucket'] == filter_status]
-                        
+                    if filter_cat != "All": deep_dive_df = deep_dive_df[deep_dive_df['MainCategory'] == filter_cat]
+                    if filter_sub != "All": deep_dive_df = deep_dive_df[deep_dive_df['Subcategory_Clean'] == filter_sub]
+                    if filter_status != "All": deep_dive_df = deep_dive_df[deep_dive_df['StatusBucket'] == filter_status]
                     if use_date and len(filter_dates) == 2:
                         start_d, end_d = filter_dates
                         deep_dive_df = deep_dive_df[(deep_dive_df[COL_CREATED].dt.date >= start_d) & (deep_dive_df[COL_CREATED].dt.date <= end_d)]
@@ -522,28 +471,99 @@ def main():
                     
                     raw_cols = [COL_TICKET_ID, COL_ZONE, COL_WARD, COL_CREATED, 'AgeDays', COL_BEFORE_IMG, COL_AFTER_IMG]
                     display_cols = [c for c in raw_cols if c in deep_dive_df.columns]
-                    
                     out_df = deep_dive_df[display_cols].copy()
                     
-                    rename_mapping = {
-                        COL_TICKET_ID: "Ticket Number",
-                        COL_ZONE: "Zone",
-                        COL_WARD: "Ward",
-                        COL_CREATED: "Raised Date",
-                        'AgeDays': "Age (Days)",
-                        COL_BEFORE_IMG: "Before Image Link",
-                        COL_AFTER_IMG: "After Image Link"
-                    }
-                    out_df = out_df.rename(columns=rename_mapping)
+                    out_df = out_df.rename(columns={
+                        COL_TICKET_ID: "Ticket Number", COL_ZONE: "Zone", COL_WARD: "Ward", COL_CREATED: "Raised Date",
+                        'AgeDays': "Age (Days)", COL_BEFORE_IMG: "Before Image Link", COL_AFTER_IMG: "After Image Link"
+                    })
                     
-                    st.dataframe(
-                        out_df, 
-                        use_container_width=True,
-                        column_config={
-                            "Before Image Link": st.column_config.ImageColumn("Before Image Preview"),
-                            "After Image Link": st.column_config.ImageColumn("After Image Preview")
-                        }
-                    )
+                    st.dataframe(out_df, use_container_width=True, column_config={
+                        "Before Image Link": st.column_config.ImageColumn("Before Image Preview"),
+                        "After Image Link": st.column_config.ImageColumn("After Image Preview")
+                    })
+
+            # ==========================================
+            # ZONE-WISE DRILL DOWN
+            # ==========================================
+            elif st.session_state.current_view == "Zone-wise Drill-Down":
+                st.subheader("🗺️ Zone-wise Drill-Down")
+                if COL_ZONE not in df_processed.columns:
+                    st.error(f"Column '{COL_ZONE}' required for this view is missing.")
+                else:
+                    st.markdown("##### 📅 View Settings")
+                    c1, c2 = st.columns([1, 2])
+                    with c1: use_date_zone = st.checkbox("Filter by Date Range", key="zone_date_check")
+                    with c2:
+                        if use_date_zone:
+                            min_date, max_date = df_processed[COL_CREATED].min().date(), df_processed[COL_CREATED].max().date()
+                            zone_dates = st.date_input("Select Date Range", value=(min_date, max_date), min_value=min_date, max_value=max_date, key="zone_dates")
+                    
+                    st.markdown("---")
+                    
+                    zone_view_df = df_processed.copy()
+                    if use_date_zone and len(zone_dates) == 2:
+                        start_d, end_d = zone_dates
+                        zone_view_df = zone_view_df[(zone_view_df[COL_CREATED].dt.date >= start_d) & (zone_view_df[COL_CREATED].dt.date <= end_d)]
+                        st.caption(f"Showing tickets from **{start_d.strftime('%d %b %Y')}** to **{end_d.strftime('%d %b %Y')}**")
+
+                    st.markdown("##### 📍 Zone Comparison by Status & Closure Time")
+                    b3_cat_all = st.selectbox("Select Main Category (For Zone Comparison)", main_categories, key="b3_cat_all")
+                    zone_matrix_df = zone_view_df[zone_view_df['MainCategory'] == b3_cat_all]
+                    if not zone_matrix_df.empty: display_with_fixed_footer(generate_pivot_summary(zone_matrix_df, COL_ZONE, "ALL ZONES TOTAL", show_avg_time=True))
+                    else: st.info("No tickets found for this combination.")
+                    
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    st.markdown("##### 📋 Subcategory Detail by Zone")
+                    c1, c2 = st.columns(2)
+                    with c1: b3_cat_spec = st.selectbox("Select Main Category", main_categories, key="b3_cat_spec")
+                    with c2: b3_zone_spec = st.selectbox("Select Zone", sorted(df_processed[COL_ZONE].dropna().unique()), key="b3_zone_spec")
+                    
+                    zone_spec_df = zone_view_df[(zone_view_df['MainCategory'] == b3_cat_spec) & (zone_view_df[COL_ZONE] == b3_zone_spec)]
+                    if not zone_spec_df.empty: display_with_fixed_footer(generate_pivot_summary(zone_spec_df, 'Subcategory_Clean', f"{b3_cat_spec} - {b3_zone_spec} Total", show_avg_time=True))
+                    else: st.warning("No data found for this zone and category in the selected date range.")
+
+            # ==========================================
+            # GEOSPATIAL MAP VIEW
+            # ==========================================
+            elif st.session_state.current_view == "Geospatial Map":
+                st.subheader("🗺️ Ticket Geospatial Map")
+                st.caption("Visualizing ticket locations based on field coordinates.")
+                
+                if 'latitude' not in df_processed.columns or df_processed['latitude'].isna().all():
+                    st.warning(f"⚠️ Latitude/Longitude data could not be extracted. Please ensure the '{COL_ADDRESS}' column contains Google Maps links.")
+                else:
+                    c1, c2, c3 = st.columns(3)
+                    with c1: map_zone = st.selectbox("1. Select Zone", ["All"] + sorted(df_processed[COL_ZONE].dropna().unique().tolist())) if COL_ZONE in df_processed.columns else "All"
+                    with c2: map_cat = st.selectbox("2. Select Category", ["All"] + main_categories)
+                    with c3:
+                        avail_subs = ["All"] + sorted(df_processed['Subcategory_Clean'].dropna().unique().tolist()) if map_cat == "All" else ["All"] + sorted(df_processed[df_processed['MainCategory'] == map_cat]['Subcategory_Clean'].dropna().unique().tolist())
+                        map_sub = st.selectbox("3. Select Subcategory", avail_subs)
+                        
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    d1, d2 = st.columns([1, 2])
+                    with d1: use_date = st.checkbox("📅 Filter by Date Range", key="map_date_check")
+                    with d2:
+                        if use_date:
+                            min_date, max_date = df_processed[COL_CREATED].min().date(), df_processed[COL_CREATED].max().date()
+                            map_dates = st.date_input("4. Select Date Range", value=(min_date, max_date), min_value=min_date, max_value=max_date, key="map_dates")
+                    
+                    map_df = df_processed.copy()
+                    if map_zone != "All" and COL_ZONE in map_df.columns: map_df = map_df[map_df[COL_ZONE] == map_zone]
+                    if map_cat != "All": map_df = map_df[map_df['MainCategory'] == map_cat]
+                    if map_sub != "All": map_df = map_df[map_df['Subcategory_Clean'] == map_sub]
+                    if use_date and len(map_dates) == 2:
+                        start_d, end_d = map_dates
+                        map_df = map_df[(map_df[COL_CREATED].dt.date >= start_d) & (map_df[COL_CREATED].dt.date <= end_d)]
+                    
+                    map_df_clean = map_df.dropna(subset=['latitude', 'longitude'])
+                    
+                    if not map_df_clean.empty:
+                        st.markdown(f"**Showing {len(map_df_clean)} tickets on the map:**")
+                        dot_size = st.slider("⚪ Adjust Dot Size", min_value=5, max_value=100, value=15, help="Slide left to reduce crowding")
+                        st.map(map_df_clean, latitude='latitude', longitude='longitude', size=dot_size)
+                    else:
+                        st.info("No tickets with valid coordinates found for these filters.")
 
             # ==========================================
             # OFFICER LEADERBOARD
@@ -558,23 +578,13 @@ def main():
                     unresolved_df = df_processed[df_processed['StatusBucket'].isin(UNRESOLVED_STATUSES)].copy()
                     ignore_list = ['Unassigned', 'Roster Unavailable', 'Column Missing']
                     
-                    unmapped_df = unresolved_df[
-                        (unresolved_df['Supervisor'].isin(ignore_list)) & 
-                        (unresolved_df['SFI/JE'].isin(ignore_list))
-                    ]
+                    unmapped_df = unresolved_df[(unresolved_df['Supervisor'].isin(ignore_list)) & (unresolved_df['SFI/JE'].isin(ignore_list))]
                     unmapped_count = unmapped_df.shape[0]
                     
                     if unmapped_count > 0:
                         st.error(f"⚠️ **{unmapped_count} unresolved tickets** could not be mapped to ANY officer. They are hidden from this leaderboard.")
-                        
                         csv = unmapped_df.to_csv(index=False).encode('utf-8')
-                        st.download_button(
-                            label="⬇️ Download Unmapped Tickets (CSV)",
-                            data=csv,
-                            file_name=f"unmapped_tickets_{datetime.now().strftime('%Y%m%d')}.csv",
-                            mime="text/csv",
-                            type="secondary"
-                        )
+                        st.download_button(label="⬇️ Download Unmapped Tickets (CSV)", data=csv, file_name=f"unmapped_tickets_{datetime.now().strftime('%Y%m%d')}.csv", mime="text/csv", type="secondary")
                     
                     sanitation_df = unresolved_df[unresolved_df['MainCategory'] == 'Sanitation']
                     eng_df = unresolved_df[unresolved_df['MainCategory'] == 'Engineering']
@@ -587,7 +597,6 @@ def main():
                     
                     def draw_leaderboard(df_to_use, group_col, role_label):
                         clean_df = df_to_use[~df_to_use[group_col].isin(ignore_list)]
-                        
                         if clean_df.empty:
                             st.info(f"No unresolved tickets found for {role_label}s in this category.")
                             return
@@ -602,7 +611,6 @@ def main():
                             top_5 = counts.head(5).copy()
                             top_5.index = top_5.index + 1  
                             st.dataframe(top_5, use_container_width=True)
-                            
                         with c2:
                             st.error(f"⚠️ Bottom 5 {role_label}s (Highest Pendency)")
                             bottom_5 = counts.tail(5).sort_values('Total Unresolved Tickets', ascending=False).reset_index(drop=True)
@@ -615,11 +623,9 @@ def main():
                         st.markdown("<br>", unsafe_allow_html=True)
                         st.markdown("##### 👔 SFIs")
                         draw_leaderboard(sanitation_df, 'SFI/JE', 'SFI')
-                        
                     with t2:
                         st.markdown("##### 👔 Junior Engineers (JEs)")
                         draw_leaderboard(eng_df, 'SFI/JE', 'JE')
-
                     with t3:
                         st.markdown("##### 👔 Junior Engineers (JEs)")
                         draw_leaderboard(malba_df, 'SFI/JE', 'JE')
@@ -629,10 +635,7 @@ def main():
                     
                     f1, f2, f3 = st.columns(3)
                     with f1: f_cat = st.selectbox("Category", ["All"] + main_categories)
-                    if COL_ZONE in df_processed.columns:
-                        with f2: f_zone = st.selectbox("Zone", ["All"] + sorted(df_processed[COL_ZONE].dropna().unique().tolist()))
-                    else:
-                        f_zone = "All"
+                    with f2: f_zone = st.selectbox("Zone", ["All"] + sorted(df_processed[COL_ZONE].dropna().unique().tolist())) if COL_ZONE in df_processed.columns else "All"
                     with f3: role_type = st.radio("Select Role to Inspect", ["Supervisor", "SFI / JE"], horizontal=True)
                     
                     filt_df = unresolved_df.copy()
@@ -640,56 +643,25 @@ def main():
                     if f_zone != "All" and COL_ZONE in filt_df.columns: filt_df = filt_df[filt_df[COL_ZONE] == f_zone]
                     
                     target_col = 'Supervisor' if role_type == "Supervisor" else 'SFI/JE'
-                    
                     filt_df = filt_df[~filt_df[target_col].isin(ignore_list)]
                     
                     if not filt_df.empty:
                         officer_list = ["All"] + sorted(filt_df[target_col].dropna().unique().tolist())
                         f_officer = st.selectbox(f"Select Specific Officer", officer_list)
-                        
-                        if f_officer != "All":
-                            filt_df = filt_df[filt_df[target_col] == f_officer]
+                        if f_officer != "All": filt_df = filt_df[filt_df[target_col] == f_officer]
                             
                         final_table = filt_df.groupby(target_col).size().reset_index(name='Total Unresolved Tickets')
                         final_table = final_table.sort_values('Total Unresolved Tickets', ascending=False).reset_index(drop=True)
                         final_table.columns = ['Officer Name', 'Total Unresolved Tickets']
-                        
                         final_table.index = final_table.index + 1
-                        
                         st.dataframe(final_table, use_container_width=True)
-                    else:
-                        st.info("No unresolved tickets found matching those filters.")
-
-            elif st.session_state.current_view == "Zone-wise Drill-Down":
-                st.subheader("🗺️ Zone-wise Drill-Down")
-                if COL_ZONE not in df_processed.columns:
-                    st.error(f"Column '{COL_ZONE}' required for this view is missing.")
-                else:
-                    st.markdown("##### 📍 Zone Comparison by Status & Closure Time")
-                    b3_cat_all = st.selectbox("Select Main Category (For Zone Comparison)", main_categories, key="b3_cat_all")
-                    zone_matrix_df = df_processed[df_processed['MainCategory'] == b3_cat_all]
-                    if not zone_matrix_df.empty:
-                        display_with_fixed_footer(generate_pivot_summary(zone_matrix_df, COL_ZONE, "ALL ZONES TOTAL", show_avg_time=True))
-                    
-                    st.markdown("<br>", unsafe_allow_html=True)
-                    st.markdown("##### 📋 Subcategory Detail by Zone")
-                    c1, c2 = st.columns(2)
-                    with c1: b3_cat_spec = st.selectbox("Select Main Category", main_categories, key="b3_cat_spec")
-                    with c2: b3_zone_spec = st.selectbox("Select Zone", sorted(df_processed[COL_ZONE].dropna().unique()), key="b3_zone_spec")
-                    
-                    zone_spec_df = df_processed[(df_processed['MainCategory'] == b3_cat_spec) & (df_processed[COL_ZONE] == b3_zone_spec)]
-                    if not zone_spec_df.empty:
-                        display_with_fixed_footer(generate_pivot_summary(zone_spec_df, 'Subcategory_Clean', f"{b3_cat_spec} - {b3_zone_spec} Total", show_avg_time=True))
-                    else:
-                        st.warning("No data found.")
+                    else: st.info("No unresolved tickets found matching those filters.")
 
             # ==========================================
             # AGE-WISE PENDENCY
             # ==========================================
             elif st.session_state.current_view == "Age-wise Pendency":
                 st.subheader("⏳ Age-wise Pendency Analysis")
-                
-                # --- 1. Summary Table ---
                 b5_cat = st.selectbox("Select Category", ["All Categories"] + main_categories)
                 
                 if b5_cat != "All Categories":
@@ -702,70 +674,63 @@ def main():
                 if not age_df.empty:
                     st.markdown("##### 📊 Age-wise Summary")
                     st.dataframe(generate_aging_summary(age_df, grouping_col), use_container_width=True)
-                else:
-                    st.success("No unresolved tickets found for this category.")
+                else: st.success("No unresolved tickets found for this category.")
                     
                 st.markdown("---")
                 st.subheader("🔎 Pendency Ticket Inspector")
-                
-                # --- 2. Ticket Inspector ---
                 with st.expander("Click to Open Pendency Inspector", expanded=False):
                     f1, f2, f3 = st.columns(3)
-                    
-                    with f1:
-                        filter_cat_age = st.selectbox("1. Category", ["All"] + main_categories, key="insp_cat_age")
-                        
+                    with f1: filter_cat_age = st.selectbox("1. Category", ["All"] + main_categories, key="insp_cat_age")
                     with f2:
-                        if filter_cat_age == "All":
-                            available_subs_age = ["All"] + sorted(df_processed['Subcategory_Clean'].dropna().unique().tolist())
-                        else:
-                            available_subs_age = ["All"] + sorted(df_processed[df_processed['MainCategory'] == filter_cat_age]['Subcategory_Clean'].dropna().unique().tolist())
-                        filter_sub_age = st.selectbox("2. Subcategory", available_subs_age, key="insp_sub_age")
-                        
-                    with f3:
-                        age_buckets = ['< 1 Month', '1-6 Months', '6-12 Months', '> 1 Year']
-                        filter_age_bucket = st.selectbox("3. Age Bucket", ["All"] + age_buckets)
+                        avail_subs_age = ["All"] + sorted(df_processed['Subcategory_Clean'].dropna().unique().tolist()) if filter_cat_age == "All" else ["All"] + sorted(df_processed[df_processed['MainCategory'] == filter_cat_age]['Subcategory_Clean'].dropna().unique().tolist())
+                        filter_sub_age = st.selectbox("2. Subcategory", avail_subs_age, key="insp_sub_age")
+                    with f3: filter_age_bucket = st.selectbox("3. Age Bucket", ["All", '< 1 Month', '1-6 Months', '6-12 Months', '> 1 Year'])
                         
                     insp_age_df = df_processed[df_processed['StatusBucket'].isin(UNRESOLVED_STATUSES)].copy()
-                    
-                    if filter_cat_age != "All":
-                        insp_age_df = insp_age_df[insp_age_df['MainCategory'] == filter_cat_age]
-                    if filter_sub_age != "All":
-                        insp_age_df = insp_age_df[insp_age_df['Subcategory_Clean'] == filter_sub_age]
-                    if filter_age_bucket != "All":
-                        insp_age_df = insp_age_df[insp_age_df['AgeBucket'] == filter_age_bucket]
+                    if filter_cat_age != "All": insp_age_df = insp_age_df[insp_age_df['MainCategory'] == filter_cat_age]
+                    if filter_sub_age != "All": insp_age_df = insp_age_df[insp_age_df['Subcategory_Clean'] == filter_sub_age]
+                    if filter_age_bucket != "All": insp_age_df = insp_age_df[insp_age_df['AgeBucket'] == filter_age_bucket]
                         
                     st.markdown(f"**Found {len(insp_age_df)} pending tickets:**")
                     
-                    raw_cols_age = [COL_TICKET_ID, COL_CREATED, COL_ZONE, COL_WARD, 'SFI/JE', 'Supervisor', COL_BEFORE_IMG]
+                    raw_cols_age = [COL_TICKET_ID, COL_CREATED, COL_ZONE, COL_WARD, 'SFI/JE', 'Supervisor', COL_ADDRESS, COL_BEFORE_IMG]
                     display_cols_age = [c for c in raw_cols_age if c in insp_age_df.columns]
-                    
                     out_age_df = insp_age_df[display_cols_age].copy()
                     
-                    rename_mapping_age = {
-                        COL_TICKET_ID: "Ticket Number",
-                        COL_CREATED: "Raised Date",
-                        COL_ZONE: "Zone",
-                        COL_WARD: "Ward",
-                        'SFI/JE': "SFI/JE Name",
-                        'Supervisor': "Supervisor Name",
-                        COL_BEFORE_IMG: "Before Image"
-                    }
-                    out_age_df = out_age_df.rename(columns=rename_mapping_age)
+                    out_age_df = out_age_df.rename(columns={
+                        COL_TICKET_ID: "Ticket Number", COL_CREATED: "Raised Date", COL_ZONE: "Zone", COL_WARD: "Ward",
+                        'SFI/JE': "SFI/JE Name", 'Supervisor': "Supervisor Name", COL_ADDRESS: "Map Link", COL_BEFORE_IMG: "Before Image"
+                    })
                     
-                    st.dataframe(
-                        out_age_df, 
-                        use_container_width=True,
-                        column_config={
-                            "Before Image": st.column_config.ImageColumn("Before Image"),
-                            "Raised Date": st.column_config.DatetimeColumn("Raised Date", format="DD MMM YYYY, HH:mm")
-                        }
+                    st.dataframe(out_age_df, use_container_width=True, column_config={
+                        "Map Link": st.column_config.LinkColumn("Location", display_text="📍 View on Map"),
+                        "Before Image": st.column_config.ImageColumn("Before Image"),
+                        "Raised Date": st.column_config.DatetimeColumn("Raised Date", format="DD MMM YYYY, HH:mm")
+                    })
+                    
+                    # --- EXCEL DOWNLOAD BUTTON FOR FIELD VERIFICATION ---
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    buffer = io.BytesIO()
+                    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                        out_age_df.to_excel(writer, index=False, sheet_name='Pending_Tickets')
+                        worksheet = writer.sheets['Pending_Tickets']
+                        for idx, col in enumerate(out_age_df.columns):
+                            series = out_age_df[col]
+                            max_len = max((series.astype(str).map(len).max(), len(str(series.name)))) + 2
+                            worksheet.column_dimensions[chr(65 + idx)].width = min(max_len, 50) 
+                    excel_data = buffer.getvalue()
+                    
+                    st.download_button(
+                        label="⬇️ Download Pending List for Field Team (Excel)",
+                        data=excel_data, file_name=f"pendency_field_report_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary"
                     )
 
+            # ==========================================
+            # MONTHLY TREND ANALYSIS
+            # ==========================================
             elif st.session_state.current_view == "Monthly Trend Analysis":
                 st.subheader("📅 Monthly Trend Analysis")
-                st.caption("Compare ticket volumes and track average closure times across the year.")
-                
                 if all_years:
                     selected_year = st.selectbox("Select Year", all_years, key="trend_year")
                     st.markdown(f"**1. Monthly Ticket Volume ({selected_year})**")
@@ -797,7 +762,6 @@ def main():
                         
                         if COL_RESOLVED in df_processed.columns:
                             closed_year_df = df_processed[(df_processed[COL_RESOLVED].dt.year == selected_year) & (df_processed['StatusBucket'] == 'CLOSED')].copy()
-                            
                             if not closed_year_df.empty and 'ClosureTimeDays' in closed_year_df.columns:
                                 closed_year_df['ResolvedMonth'] = closed_year_df[COL_RESOLVED].dt.month
                                 
@@ -805,7 +769,6 @@ def main():
                                 main_avg_pivot = closed_year_df.groupby(['MainCategory', 'ResolvedMonth'])['ClosureTimeDays'].mean().unstack(fill_value=None).round(1)
                                 for m in range(1, 13):
                                     if m not in main_avg_pivot.columns: main_avg_pivot[m] = None
-                                        
                                 main_avg_pivot = main_avg_pivot[range(1, 13)]
                                 main_avg_pivot.columns = [calendar.month_abbr[m] for m in range(1, 13)]
                                 main_avg_pivot['Yearly Avg'] = closed_year_df.groupby('MainCategory')['ClosureTimeDays'].mean().round(1)
@@ -813,7 +776,6 @@ def main():
                                 monthly_avgs = closed_year_df.groupby('ResolvedMonth')['ClosureTimeDays'].mean().round(1)
                                 total_row_data = {calendar.month_abbr[m]: monthly_avgs.get(m, None) for m in range(1, 13)}
                                 total_row_data['Yearly Avg'] = closed_year_df['ClosureTimeDays'].mean().round(1)
-                                
                                 st.dataframe(pd.concat([main_avg_pivot, pd.DataFrame([total_row_data], index=['**OVERALL AVG**'])]), use_container_width=True)
                                 
                                 st.markdown("##### 🔍 Subcategory Drill-Down")
@@ -833,20 +795,19 @@ def main():
                                 line_df = closed_year_df.groupby(['ResolvedMonth', 'MainCategory'])['ClosureTimeDays'].mean().unstack()
                                 line_df.index = [f"{selected_year}-{str(int(m)).zfill(2)}" for m in line_df.index]
                                 st.line_chart(line_df, use_container_width=True)
-                            else:
-                                st.info("No closure time data available.")
-                else:
-                    st.warning("⚠️ No valid dates found in the data.")
+                            else: st.info("No closure time data available.")
+                else: st.warning("⚠️ No valid dates found in the data.")
 
+            # ==========================================
+            # CUSTOM DATE RANGE
+            # ==========================================
             elif st.session_state.current_view == "Custom Date Range Analysis":
                 st.subheader("📆 Custom Date Range Analysis")
                 c1, c2 = st.columns(2)
                 with c1:
-                    min_date = df_processed[COL_CREATED].min().date()
-                    max_date = df_processed[COL_CREATED].max().date()
+                    min_date, max_date = df_processed[COL_CREATED].min().date(), df_processed[COL_CREATED].max().date()
                     custom_dates = st.date_input("1️⃣ Select Date Range", value=(min_date, max_date), min_value=min_date, max_value=max_date)
-                with c2:
-                    custom_cat = st.selectbox("2️⃣ Select Category", ["All Categories"] + main_categories)
+                with c2: custom_cat = st.selectbox("2️⃣ Select Category", ["All Categories"] + main_categories)
                     
                 if len(custom_dates) == 2:
                     start_date, end_date = custom_dates
@@ -865,8 +826,7 @@ def main():
                         closed_df = closed_df[closed_df['MainCategory'] == custom_cat]
                         closed_out_of_raised_df = closed_out_of_raised_df[closed_out_of_raised_df['MainCategory'] == custom_cat]
                         group_col = 'Subcategory_Clean'
-                    else:
-                        group_col = 'MainCategory'
+                    else: group_col = 'MainCategory'
                         
                     raised_grouped = raised_df.groupby(group_col).size().rename("Total Raised")
                     closed_grouped = closed_df.groupby(group_col).size().rename("Total Closed")
@@ -884,9 +844,11 @@ def main():
                         
                         st.dataframe(pd.concat([custom_summary, total_row]), use_container_width=True, column_config={"% of New Tickets Resolved": st.column_config.NumberColumn(format="%.1f%%")})
                         st.bar_chart(custom_summary[["Total Raised", "Total Closed", "Closed (Out of Raised)"]], use_container_width=True)
-                    else:
-                        st.info("No data found for this specific combination.")
+                    else: st.info("No data found for this specific combination.")
 
+            # ==========================================
+            # QUARTERLY PERFORMANCE (FY)
+            # ==========================================
             elif st.session_state.current_view == "Quarterly Performance (FY)":
                 st.subheader("📊 Quarterly Performance (FY)")
                 def get_fy(date_val):
@@ -917,10 +879,7 @@ def main():
                     with c2: quarterly_cat = st.selectbox("2️⃣ Select Category", ["All Categories"] + main_categories)
                     
                     q_base_df = fy_df[fy_df['FY'] == selected_fy].copy()
-                    if COL_RESOLVED in fy_df.columns:
-                        q_closed_base_df = fy_df[fy_df['Resolved_FY'] == selected_fy].copy()
-                    else:
-                        q_closed_base_df = pd.DataFrame(columns=fy_df.columns)
+                    q_closed_base_df = fy_df[fy_df['Resolved_FY'] == selected_fy].copy() if COL_RESOLVED in fy_df.columns else pd.DataFrame(columns=fy_df.columns)
 
                     if quarterly_cat != "All Categories":
                         q_base_df = q_base_df[q_base_df['MainCategory'] == quarterly_cat]
@@ -933,17 +892,14 @@ def main():
                         if COL_RESOLVED in q_base_df.columns:
                             same_q_mask = (q_base_df['StatusBucket'] == 'CLOSED') & (q_base_df['Resolved_FY_Quarter'] == q_base_df['FY_Quarter']) & (q_base_df['Resolved_FY'] == q_base_df['FY'])
                             q_resolved = q_base_df[same_q_mask].groupby('FY_Quarter').size().rename("Resolved Same Quarter")
-                        else:
-                            q_resolved = pd.Series(dtype=int, name="Resolved Same Quarter")
+                        else: q_resolved = pd.Series(dtype=int, name="Resolved Same Quarter")
                         
                         quarter_summary = pd.concat([q_raised, q_total_closed, q_resolved], axis=1).fillna(0).astype(int)
-                        
                         for q in ['Q1 (Apr-Jun)', 'Q2 (Jul-Sep)', 'Q3 (Oct-Dec)', 'Q4 (Jan-Mar)']:
                             if q not in quarter_summary.index: quarter_summary.loc[q] = [0, 0, 0]
                         
                         quarter_summary = quarter_summary.sort_index()
                         quarter_summary['% Resolved Same Quarter'] = ((quarter_summary['Resolved Same Quarter'] / quarter_summary['Tickets Raised']) * 100).fillna(0).round(1)
-                        
                         total_raised = quarter_summary["Tickets Raised"].sum()
                         total_row = pd.DataFrame([{
                             "Tickets Raised": total_raised, "Total Closed": quarter_summary["Total Closed"].sum(),
@@ -966,11 +922,9 @@ def main():
                             sm_raised = sm_df.groupby('FY_Quarter').size().rename("Tickets Raised")
                             if COL_RESOLVED in sm_df.columns:
                                 sm_closed = sm_df[(sm_df['StatusBucket'] == 'CLOSED') & (sm_df['Resolved_FY_Quarter'] == sm_df['FY_Quarter']) & (sm_df['Resolved_FY'] == sm_df['FY'])].groupby('FY_Quarter').size().rename("Closed Same Quarter")
-                            else:
-                                sm_closed = pd.Series(dtype=int, name="Closed Same Quarter")
+                            else: sm_closed = pd.Series(dtype=int, name="Closed Same Quarter")
                                 
                             sm_trend = pd.concat([sm_raised, sm_closed], axis=1).fillna(0).astype(int)
-                            
                             for q in ['Q1 (Apr-Jun)', 'Q2 (Jul-Sep)', 'Q3 (Oct-Dec)', 'Q4 (Jan-Mar)']:
                                 if q not in sm_trend.index: sm_trend.loc[q] = [0, 0]
                             
@@ -1003,17 +957,13 @@ def main():
                                 surveyor_pivot.index = surveyor_pivot.index.map(lambda val: calendar.month_abbr[int(val)] if str(val).isdigit() or isinstance(val, (int, float)) else val)
                                 surveyor_pivot.index.name = "Month"
                                 st.dataframe(surveyor_pivot, use_container_width=True)
-                            else:
-                                st.info(f"No authorized surveyor raised 100+ tickets in {surveyor_year}.")
+                            else: st.info(f"No authorized surveyor raised 100+ tickets in {surveyor_year}.")
                     
                     st.markdown("---")
-                    
                     st.markdown("### 🔍 Surveyor Deep Dive & Inspector")
-                    
                     c1, c2 = st.columns(2)
                     with c1:
-                        min_date = view_df[COL_CREATED].min().date()
-                        max_date = view_df[COL_CREATED].max().date()
+                        min_date, max_date = view_df[COL_CREATED].min().date(), view_df[COL_CREATED].max().date()
                         surv_dates = st.date_input("1. Select Date Range", value=(min_date, max_date), min_value=min_date, max_value=max_date, key="surv_dates")
                     with c2:
                         all_surveyors = sorted(view_df[COL_SURVEYOR].dropna().unique().tolist())
@@ -1021,11 +971,7 @@ def main():
                         
                     if len(surv_dates) == 2 and selected_surv != "Select a Surveyor...":
                         start_d, end_d = surv_dates
-                        mask = (
-                            (view_df[COL_CREATED].dt.date >= start_d) & 
-                            (view_df[COL_CREATED].dt.date <= end_d) & 
-                            (view_df[COL_SURVEYOR] == selected_surv)
-                        )
+                        mask = ((view_df[COL_CREATED].dt.date >= start_d) & (view_df[COL_CREATED].dt.date <= end_d) & (view_df[COL_SURVEYOR] == selected_surv))
                         surv_filtered_df = view_df[mask].copy()
                         
                         if not surv_filtered_df.empty:
@@ -1038,71 +984,34 @@ def main():
                             st.markdown(f"**Detailed Tickets ({len(surv_filtered_df)} found)**")
                             raw_cols = [COL_TICKET_ID, COL_CREATED, COL_STATUS, COL_WARD, COL_ZONE, COL_BEFORE_IMG, COL_AFTER_IMG]
                             display_cols = [c for c in raw_cols if c in surv_filtered_df.columns]
-                            
                             out_df = surv_filtered_df[display_cols].copy()
-                            rename_mapping = {
-                                COL_TICKET_ID: "Ticket Number",
-                                COL_CREATED: "Raised Date",
-                                COL_STATUS: "Status",
-                                COL_WARD: "Ward",
-                                COL_ZONE: "Zone",
-                                COL_BEFORE_IMG: "Before Image",
-                                COL_AFTER_IMG: "After Image"
-                            }
-                            out_df = out_df.rename(columns=rename_mapping)
-                            
-                            st.dataframe(
-                                out_df, 
-                                use_container_width=True,
-                                column_config={
-                                    "Before Image": st.column_config.ImageColumn("Before Image"),
-                                    "After Image": st.column_config.ImageColumn("After Image"),
-                                    "Raised Date": st.column_config.DatetimeColumn("Raised Date", format="DD MMM YYYY, HH:mm")
-                                }
-                            )
-                        else:
-                            st.info("No tickets found for this surveyor in the selected date range.")
+                            out_df = out_df.rename(columns={COL_TICKET_ID: "Ticket Number", COL_CREATED: "Raised Date", COL_STATUS: "Status", COL_WARD: "Ward", COL_ZONE: "Zone", COL_BEFORE_IMG: "Before Image", COL_AFTER_IMG: "After Image"})
+                            st.dataframe(out_df, use_container_width=True, column_config={"Before Image": st.column_config.ImageColumn("Before Image"), "After Image": st.column_config.ImageColumn("After Image"), "Raised Date": st.column_config.DatetimeColumn("Raised Date", format="DD MMM YYYY, HH:mm")})
+                        else: st.info("No tickets found for this surveyor in the selected date range.")
                             
                     st.markdown("---")
-                    
                     st.markdown("### 📅 Ward Survey Schedule")
                     st.caption("Tracks the last ticket raised by an authorized surveyor in each ward and projects the next 30-day survey deadline.")
                     
                     if COL_ZONE in view_df.columns:
                         schedule_zone = st.selectbox("Select Zone for Schedule", ["All"] + sorted(view_df[COL_ZONE].dropna().unique().tolist()))
-                        sched_df = view_df.copy()
-                        if schedule_zone != "All":
-                            sched_df = sched_df[sched_df[COL_ZONE] == schedule_zone]
-                    else:
-                        sched_df = view_df.copy()
+                        sched_df = view_df[view_df[COL_ZONE] == schedule_zone] if schedule_zone != "All" else view_df.copy()
+                    else: sched_df = view_df.copy()
                         
                     if not sched_df.empty and COL_WARD in sched_df.columns:
                         schedule_summary = sched_df.groupby(COL_WARD)[COL_CREATED].max().reset_index()
                         schedule_summary.columns = ['Ward', 'Last Survey Date']
-                        
                         schedule_summary['Next Survey Due Date'] = schedule_summary['Last Survey Date'] + pd.Timedelta(days=30)
                         schedule_summary = schedule_summary.sort_values('Next Survey Due Date', ascending=True).reset_index(drop=True)
                         schedule_summary.index = schedule_summary.index + 1
-                        
-                        st.dataframe(
-                            schedule_summary, 
-                            use_container_width=True,
-                            column_config={
-                                "Last Survey Date": st.column_config.DateColumn("Last Survey Date", format="DD MMM YYYY"),
-                                "Next Survey Due Date": st.column_config.DateColumn("Next Survey Due Date", format="DD MMM YYYY")
-                            }
-                        )
-                    else:
-                        st.warning("No Ward data available for the schedule.")
-
-                else:
-                    st.warning(f"⚠️ Column '{COL_SURVEYOR}' not found.")
+                        st.dataframe(schedule_summary, use_container_width=True, column_config={"Last Survey Date": st.column_config.DateColumn("Last Survey Date", format="DD MMM YYYY"), "Next Survey Due Date": st.column_config.DateColumn("Next Survey Due Date", format="DD MMM YYYY")})
+                    else: st.warning("No Ward data available for the schedule.")
+                else: st.warning(f"⚠️ Column '{COL_SURVEYOR}' not found.")
 
         except Exception as e:
             st.error(f"❌ Error: {str(e)}")
             st.exception(e)
-    else:
-        st.info("👆 Please upload the Data file in the sidebar to begin.")
+    else: st.info("👆 Please upload the Data file in the sidebar to begin.")
 
 if __name__ == "__main__":
     main()
