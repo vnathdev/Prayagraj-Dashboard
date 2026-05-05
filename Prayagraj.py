@@ -23,7 +23,7 @@ COL_BEFORE_IMG  = "Upload Documents"
 COL_AFTER_IMG   = "Resolved Documents"
 COL_SURVEYOR    = "Surveyor Name"
 COL_RESOLVER    = "Resolver Name"
-COL_ADDRESS     = "Registered Location" 
+COL_ADDRESS     = "Registration Location" 
 
 # --- Google Sheet URLs (Converted for CSV Export) ---
 CIVIL_SHEET_URL = "https://docs.google.com/spreadsheets/d/1i1ZxGO3Tz1it45wGfU_wwjHnCiReCXQzitYYOghLF28/export?format=csv&gid=0"
@@ -326,10 +326,8 @@ def main():
     
     if 'current_view' not in st.session_state: st.session_state.current_view = "Main Category Summary"
     
-    # --- REMOVED GEOSPATIAL MAP FROM SIDEBAR ---
     views = [
         "Main Category Summary", "Subcategory Drill-Down", "Zone-wise Drill-Down", 
-        # "Geospatial Map",  # <-- PAUSED
         "Officer Leaderboard", "Age-wise Pendency", "Monthly Trend Analysis",
         "Custom Date Range Analysis", "Quarterly Performance (FY)", "Surveyor Performance"
     ]
@@ -525,52 +523,6 @@ def main():
                     else: st.warning("No data found for this zone and category in the selected date range.")
 
             # ==========================================
-            # GEOSPATIAL MAP VIEW (PAUSED)
-            # ==========================================
-            # elif st.session_state.current_view == "Geospatial Map":
-            #     st.subheader("🗺️ Ticket Geospatial Map")
-            #     st.caption("Visualizing ticket locations based on field coordinates.")
-            #     
-            #     if 'latitude' not in df_processed.columns or df_processed['latitude'].isna().all():
-            #         st.warning(f"⚠️ Latitude/Longitude data could not be extracted. Please ensure the '{COL_ADDRESS}' column contains Google Maps links.")
-            #     else:
-            #         c1, c2, c3, c4 = st.columns(4) 
-            #         with c1:
-            #             if COL_ZONE in df_processed.columns: map_zone = st.selectbox("1. Select Zone", ["All"] + sorted(df_processed[COL_ZONE].dropna().unique().tolist()), key="map_zone_filter")
-            #             else: map_zone = "All"
-            #         with c2: map_status = st.selectbox("2. Select Status", ["All"] + STATUS_COLUMNS, key="map_status_filter")
-            #         with c3: map_cat = st.selectbox("3. Select Category", ["All"] + main_categories, key="map_cat_filter")
-            #         with c4:
-            #             avail_subs = ["All"] + sorted(df_processed['Subcategory_Clean'].dropna().unique().tolist()) if map_cat == "All" else ["All"] + sorted(df_processed[df_processed['MainCategory'] == map_cat]['Subcategory_Clean'].dropna().unique().tolist())
-            #             map_sub = st.selectbox("4. Select Subcategory", avail_subs, key="map_sub_filter")
-            #             
-            #         st.markdown("<br>", unsafe_allow_html=True)
-            #         d1, d2 = st.columns([1, 2])
-            #         with d1: use_date = st.checkbox("📅 Filter by Date Range", key="map_date_check")
-            #         with d2:
-            #             if use_date:
-            #                 min_date = df_processed[COL_CREATED].min().date()
-            #                 max_date = df_processed[COL_CREATED].max().date()
-            #                 map_dates = st.date_input("5. Select Date Range", value=(min_date, max_date), min_value=min_date, max_value=max_date, key="map_dates_picker")
-            #         
-            #         map_df = df_processed.copy()
-            #         if map_zone != "All" and COL_ZONE in map_df.columns: map_df = map_df[map_df[COL_ZONE] == map_zone]
-            #         if map_status != "All": map_df = map_df[map_df['StatusBucket'] == map_status]
-            #         if map_cat != "All": map_df = map_df[map_df['MainCategory'] == map_cat]
-            #         if map_sub != "All": map_df = map_df[map_df['Subcategory_Clean'] == map_sub]
-            #         if use_date and len(map_dates) == 2:
-            #             start_d, end_d = map_dates
-            #             map_df = map_df[(map_df[COL_CREATED].dt.date >= start_d) & (map_df[COL_CREATED].dt.date <= end_d)]
-            #         
-            #         map_df_clean = map_df.dropna(subset=['latitude', 'longitude'])
-            #         
-            #         if not map_df_clean.empty:
-            #             st.markdown(f"**Showing {len(map_df_clean)} tickets on the map:**")
-            #             dot_size = st.slider("⚪ Adjust Dot Size", min_value=5, max_value=100, value=15, key="map_dot_size_slider")
-            #             st.map(map_df_clean, latitude='latitude', longitude='longitude', size=dot_size)
-            #         else: st.info("No tickets with valid coordinates found for these filters.")
-
-            # ==========================================
             # OFFICER LEADERBOARD
             # ==========================================
             elif st.session_state.current_view == "Officer Leaderboard":
@@ -663,7 +615,7 @@ def main():
                     else: st.info("No unresolved tickets found matching those filters.")
 
             # ==========================================
-            # AGE-WISE PENDENCY
+            # Age-wise Pendency
             # ==========================================
             elif st.session_state.current_view == "Age-wise Pendency":
                 st.subheader("⏳ Age-wise Pendency Analysis")
@@ -700,35 +652,54 @@ def main():
                     
                     raw_cols_age = [COL_TICKET_ID, COL_CREATED, COL_ZONE, COL_WARD, 'SFI/JE', 'Supervisor', COL_ADDRESS, COL_BEFORE_IMG]
                     display_cols_age = [c for c in raw_cols_age if c in insp_age_df.columns]
+                    
                     out_age_df = insp_age_df[display_cols_age].copy()
                     
-                    out_age_df = out_age_df.rename(columns={
-                        COL_TICKET_ID: "Ticket Number", COL_CREATED: "Raised Date", COL_ZONE: "Zone", COL_WARD: "Ward",
-                        'SFI/JE': "SFI/JE Name", 'Supervisor': "Supervisor Name", COL_ADDRESS: "Map Link", COL_BEFORE_IMG: "Before Image"
-                    })
+                    rename_mapping_age = {
+                        COL_TICKET_ID: "Ticket Number",
+                        COL_CREATED: "Raised Date",
+                        COL_ZONE: "Zone",
+                        COL_WARD: "Ward",
+                        'SFI/JE': "SFI/JE Name",
+                        'Supervisor': "Supervisor Name",
+                        COL_ADDRESS: "Map Link",
+                        COL_BEFORE_IMG: "Before Image"
+                    }
+                    out_age_df = out_age_df.rename(columns=rename_mapping_age)
                     
-                    st.dataframe(out_age_df, use_container_width=True, column_config={
-                        "Map Link": st.column_config.LinkColumn("Location", display_text="📍 View on Map"),
-                        "Before Image": st.column_config.ImageColumn("Before Image"),
-                        "Raised Date": st.column_config.DatetimeColumn("Raised Date", format="DD MMM YYYY, HH:mm")
-                    })
+                    st.dataframe(
+                        out_age_df, 
+                        use_container_width=True,
+                        column_config={
+                            "Map Link": st.column_config.LinkColumn("Location", display_text="📍 View on Map"),
+                            "Before Image": st.column_config.ImageColumn("Before Image"),
+                            "Raised Date": st.column_config.DatetimeColumn("Raised Date", format="DD MMM YYYY, HH:mm")
+                        }
+                    )
                     
                     # --- EXCEL DOWNLOAD BUTTON FOR FIELD VERIFICATION ---
                     st.markdown("<br>", unsafe_allow_html=True)
+                    
                     buffer = io.BytesIO()
                     with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
                         out_age_df.to_excel(writer, index=False, sheet_name='Pending_Tickets')
                         worksheet = writer.sheets['Pending_Tickets']
                         for idx, col in enumerate(out_age_df.columns):
                             series = out_age_df[col]
-                            max_len = max((series.astype(str).map(len).max(), len(str(series.name)))) + 2
-                            worksheet.column_dimensions[chr(65 + idx)].width = min(max_len, 50) 
+                            max_len = max((
+                                series.astype(str).map(len).max(),
+                                len(str(series.name))
+                            )) + 2
+                            worksheet.column_dimensions[chr(65 + idx)].width = min(max_len, 50) # Cap width at 50
+                            
                     excel_data = buffer.getvalue()
                     
                     st.download_button(
                         label="⬇️ Download Pending List for Field Team (Excel)",
-                        data=excel_data, file_name=f"pendency_field_report_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary"
+                        data=excel_data,
+                        file_name=f"pendency_field_report_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        type="primary"
                     )
 
             # ==========================================
