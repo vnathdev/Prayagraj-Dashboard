@@ -529,90 +529,87 @@ def main():
                 st.subheader("🏆 Officer Leaderboard & Pendency Tracking")
                 st.caption("Live mappings pulled from Google Sheets.")
                 
-                if 'Supervisor' not in df_processed.columns or 'SFI/JE' not in df_processed.columns:
-                    st.warning("⚠️ Officer mapping columns not found. Check Google Sheet connectivity.")
-                else:
-                    unresolved_df = df_processed[df_processed['StatusBucket'].isin(UNRESOLVED_STATUSES)].copy()
-                    ignore_list = ['Unassigned', 'Roster Unavailable', 'Column Missing']
+                unresolved_df = df_processed[df_processed['StatusBucket'].isin(UNRESOLVED_STATUSES)].copy()
+                ignore_list = ['Unassigned', 'Roster Unavailable', 'Column Missing']
+                
+                unmapped_df = unresolved_df[(unresolved_df['Supervisor'].isin(ignore_list)) & (unresolved_df['SFI/JE'].isin(ignore_list))]
+                unmapped_count = unmapped_df.shape[0]
+                
+                if unmapped_count > 0:
+                    st.error(f"⚠️ **{unmapped_count} unresolved tickets** could not be mapped to ANY officer. They are hidden from this leaderboard.")
+                    csv = unmapped_df.to_csv(index=False).encode('utf-8')
+                    st.download_button(label="⬇️ Download Unmapped Tickets (CSV)", data=csv, file_name=f"unmapped_tickets_{datetime.now().strftime('%Y%m%d')}.csv", mime="text/csv", type="secondary")
+                
+                sanitation_df = unresolved_df[unresolved_df['MainCategory'] == 'Sanitation']
+                eng_df = unresolved_df[unresolved_df['MainCategory'] == 'Engineering']
+                malba_df = unresolved_df[unresolved_df['MainCategory'] == 'Malba']
+                
+                st.markdown("### 🥇 Top & Bottom 5 Performers")
+                st.caption("Ranked by lowest and highest number of currently unresolved tickets.")
+                
+                t1, t2, t3 = st.tabs(["🧹 Sanitation", "🏗️ Engineering", "🚜 Malba"])
+                
+                def draw_leaderboard(df_to_use, group_col, role_label):
+                    clean_df = df_to_use[~df_to_use[group_col].isin(ignore_list)]
+                    if clean_df.empty:
+                        st.info(f"No unresolved tickets found for {role_label}s in this category.")
+                        return
                     
-                    unmapped_df = unresolved_df[(unresolved_df['Supervisor'].isin(ignore_list)) & (unresolved_df['SFI/JE'].isin(ignore_list))]
-                    unmapped_count = unmapped_df.shape[0]
+                    counts = clean_df.groupby(group_col).size().reset_index(name='Total Unresolved Tickets')
+                    counts = counts.sort_values('Total Unresolved Tickets', ascending=True).reset_index(drop=True)
+                    counts.columns = [f"{role_label} Name", 'Total Unresolved Tickets']
                     
-                    if unmapped_count > 0:
-                        st.error(f"⚠️ **{unmapped_count} unresolved tickets** could not be mapped to ANY officer. They are hidden from this leaderboard.")
-                        csv = unmapped_df.to_csv(index=False).encode('utf-8')
-                        st.download_button(label="⬇️ Download Unmapped Tickets (CSV)", data=csv, file_name=f"unmapped_tickets_{datetime.now().strftime('%Y%m%d')}.csv", mime="text/csv", type="secondary")
-                    
-                    sanitation_df = unresolved_df[unresolved_df['MainCategory'] == 'Sanitation']
-                    eng_df = unresolved_df[unresolved_df['MainCategory'] == 'Engineering']
-                    malba_df = unresolved_df[unresolved_df['MainCategory'] == 'Malba']
-                    
-                    st.markdown("### 🥇 Top & Bottom 5 Performers")
-                    st.caption("Ranked by lowest and highest number of currently unresolved tickets.")
-                    
-                    t1, t2, t3 = st.tabs(["🧹 Sanitation", "🏗️ Engineering", "🚜 Malba"])
-                    
-                    def draw_leaderboard(df_to_use, group_col, role_label):
-                        clean_df = df_to_use[~df_to_use[group_col].isin(ignore_list)]
-                        if clean_df.empty:
-                            st.info(f"No unresolved tickets found for {role_label}s in this category.")
-                            return
-                        
-                        counts = clean_df.groupby(group_col).size().reset_index(name='Total Unresolved Tickets')
-                        counts = counts.sort_values('Total Unresolved Tickets', ascending=True).reset_index(drop=True)
-                        counts.columns = [f"{role_label} Name", 'Total Unresolved Tickets']
-                        
-                        c1, c2 = st.columns(2)
-                        with c1:
-                            st.success(f"🌟 Top 5 {role_label}s (Least Pendency)")
-                            top_5 = counts.head(5).copy()
-                            top_5.index = top_5.index + 1  
-                            st.dataframe(top_5, use_container_width=True)
-                        with c2:
-                            st.error(f"⚠️ Bottom 5 {role_label}s (Highest Pendency)")
-                            bottom_5 = counts.tail(5).sort_values('Total Unresolved Tickets', ascending=False).reset_index(drop=True)
-                            bottom_5.index = bottom_5.index + 1  
-                            st.dataframe(bottom_5, use_container_width=True)
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.success(f"🌟 Top 5 {role_label}s (Least Pendency)")
+                        top_5 = counts.head(5).copy()
+                        top_5.index = top_5.index + 1  
+                        st.dataframe(top_5, use_container_width=True)
+                    with c2:
+                        st.error(f"⚠️ Bottom 5 {role_label}s (Highest Pendency)")
+                        bottom_5 = counts.tail(5).sort_values('Total Unresolved Tickets', ascending=False).reset_index(drop=True)
+                        bottom_5.index = bottom_5.index + 1  
+                        st.dataframe(bottom_5, use_container_width=True)
 
-                    with t1:
-                        st.markdown("##### 👷 Supervisors")
-                        draw_leaderboard(sanitation_df, 'Supervisor', 'Supervisor')
-                        st.markdown("<br>", unsafe_allow_html=True)
-                        st.markdown("##### 👔 SFIs")
-                        draw_leaderboard(sanitation_df, 'SFI/JE', 'SFI')
-                    with t2:
-                        st.markdown("##### 👔 Junior Engineers (JEs)")
-                        draw_leaderboard(eng_df, 'SFI/JE', 'JE')
-                    with t3:
-                        st.markdown("##### 👔 Junior Engineers (JEs)")
-                        draw_leaderboard(malba_df, 'SFI/JE', 'JE')
+                with t1:
+                    st.markdown("##### 👷 Supervisors")
+                    draw_leaderboard(sanitation_df, 'Supervisor', 'Supervisor')
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    st.markdown("##### 👔 SFIs")
+                    draw_leaderboard(sanitation_df, 'SFI/JE', 'SFI')
+                with t2:
+                    st.markdown("##### 👔 Junior Engineers (JEs)")
+                    draw_leaderboard(eng_df, 'SFI/JE', 'JE')
+                with t3:
+                    st.markdown("##### 👔 Junior Engineers (JEs)")
+                    draw_leaderboard(malba_df, 'SFI/JE', 'JE')
+                    
+                st.markdown("---")
+                st.markdown("### 🔍 Filtered Officer Pendency View")
+                
+                f1, f2, f3 = st.columns(3)
+                with f1: f_cat = st.selectbox("Category", ["All"] + main_categories)
+                with f2: f_zone = st.selectbox("Zone", ["All"] + sorted(df_processed[COL_ZONE].dropna().unique().tolist())) if COL_ZONE in df_processed.columns else "All"
+                with f3: role_type = st.radio("Select Role to Inspect", ["Supervisor", "SFI / JE"], horizontal=True)
+                
+                filt_df = unresolved_df.copy()
+                if f_cat != "All": filt_df = filt_df[filt_df['MainCategory'] == f_cat]
+                if f_zone != "All" and COL_ZONE in filt_df.columns: filt_df = filt_df[filt_df[COL_ZONE] == f_zone]
+                
+                target_col = 'Supervisor' if role_type == "Supervisor" else 'SFI/JE'
+                filt_df = filt_df[~filt_df[target_col].isin(ignore_list)]
+                
+                if not filt_df.empty:
+                    officer_list = ["All"] + sorted(filt_df[target_col].dropna().unique().tolist())
+                    f_officer = st.selectbox(f"Select Specific Officer", officer_list)
+                    if f_officer != "All": filt_df = filt_df[filt_df[target_col] == f_officer]
                         
-                    st.markdown("---")
-                    st.markdown("### 🔍 Filtered Officer Pendency View")
-                    
-                    f1, f2, f3 = st.columns(3)
-                    with f1: f_cat = st.selectbox("Category", ["All"] + main_categories)
-                    with f2: f_zone = st.selectbox("Zone", ["All"] + sorted(df_processed[COL_ZONE].dropna().unique().tolist())) if COL_ZONE in df_processed.columns else "All"
-                    with f3: role_type = st.radio("Select Role to Inspect", ["Supervisor", "SFI / JE"], horizontal=True)
-                    
-                    filt_df = unresolved_df.copy()
-                    if f_cat != "All": filt_df = filt_df[filt_df['MainCategory'] == f_cat]
-                    if f_zone != "All" and COL_ZONE in filt_df.columns: filt_df = filt_df[filt_df[COL_ZONE] == f_zone]
-                    
-                    target_col = 'Supervisor' if role_type == "Supervisor" else 'SFI/JE'
-                    filt_df = filt_df[~filt_df[target_col].isin(ignore_list)]
-                    
-                    if not filt_df.empty:
-                        officer_list = ["All"] + sorted(filt_df[target_col].dropna().unique().tolist())
-                        f_officer = st.selectbox(f"Select Specific Officer", officer_list)
-                        if f_officer != "All": filt_df = filt_df[filt_df[target_col] == f_officer]
-                            
-                        final_table = filt_df.groupby(target_col).size().reset_index(name='Total Unresolved Tickets')
-                        final_table = final_table.sort_values('Total Unresolved Tickets', ascending=False).reset_index(drop=True)
-                        final_table.columns = ['Officer Name', 'Total Unresolved Tickets']
-                        final_table.index = final_table.index + 1
-                        st.dataframe(final_table, use_container_width=True)
-                    else: st.info("No unresolved tickets found matching those filters.")
+                    final_table = filt_df.groupby(target_col).size().reset_index(name='Total Unresolved Tickets')
+                    final_table = final_table.sort_values('Total Unresolved Tickets', ascending=False).reset_index(drop=True)
+                    final_table.columns = ['Officer Name', 'Total Unresolved Tickets']
+                    final_table.index = final_table.index + 1
+                    st.dataframe(final_table, use_container_width=True)
+                else: st.info("No unresolved tickets found matching those filters.")
 
             # ==========================================
             # Age-wise Pendency
@@ -686,8 +683,9 @@ def main():
                         worksheet = writer.sheets['Pending_Tickets']
                         for idx, col in enumerate(out_age_df.columns):
                             series = out_age_df[col]
+                            # Use safe length calculations to avoid TypeError
                             max_len = max((
-                                series.astype(str).map(len).max(),
+                                series.apply(lambda x: len(str(x))).max(),
                                 len(str(series.name))
                             )) + 2
                             worksheet.column_dimensions[chr(65 + idx)].width = min(max_len, 50) # Cap width at 50
@@ -883,7 +881,7 @@ def main():
                             "% Resolved Same Quarter": (quarter_summary["Resolved Same Quarter"].sum() / total_raised * 100) if total_raised > 0 else 0
                         }], index=["**TOTAL**"])
                         
-                        st.dataframe(pd.concat([quarter_summary, total_row]), use_container_width=True, column_config={"% Resolved Same Quarter": st.column_config.NumberColumn(format="%.1f%%")})
+                        st.dataframe(quarter_summary, use_container_width=True, column_config={"% Resolved Same Quarter": st.column_config.NumberColumn(format="%.1f%%")})
                         st.bar_chart(quarter_summary[['Tickets Raised', 'Total Closed', 'Resolved Same Quarter']], use_container_width=True)
                         
                     st.markdown("---")
