@@ -310,6 +310,53 @@ def generate_aging_summary(df, group_col):
     summary['Total Unresolved'] = summary.sum(axis=1)
     return summary.sort_values('Total Unresolved', ascending=False)
 
+# --- MATHURA-STYLE DOUGHNUT CHART HELPER WITH % TOOLTIP ---
+def draw_doughnut(df, title, show_legend=True, height=250):
+    if df.empty:
+        return alt.Chart().mark_text().encode(text=alt.value(f"No Data")).properties(title=title, height=height)
+        
+    status_counts = df['StatusBucket'].value_counts().reset_index()
+    status_counts.columns = ['Status', 'Count']
+    
+    # Calculate % for Tooltip display
+    status_counts['Percent'] = (status_counts['Count'] / status_counts['Count'].sum() * 100).round(1).astype(str) + '%'
+    
+    legend_attr = alt.Legend(orient="right", title=None) if show_legend else None
+    
+    chart = alt.Chart(status_counts).mark_arc(innerRadius=40).encode(
+        theta=alt.Theta(field="Count", type="quantitative"),
+        color=alt.Color(field="Status", type="nominal", scale=alt.Scale(domain=STATUS_COLUMNS, range=['#F59E0B', '#9CA3AF', '#10B981']), legend=legend_attr),
+        tooltip=['Status', 'Count', 'Percent']
+    ).properties(title=title, height=height)
+    
+    return chart
+
+# --- NEW HELPER: CATEGORY CONTRIBUTION DOUGHNUT ---
+def draw_contribution_doughnut(df, category_col, title, show_legend=True, height=250, color_scale=None):
+    if df.empty:
+        return alt.Chart().mark_text().encode(text=alt.value(f"No Data")).properties(title=title, height=height)
+        
+    counts = df[category_col].value_counts().reset_index()
+    counts.columns = ['Category', 'Count']
+    
+    # Calculate % for Tooltip display
+    counts['Percent'] = (counts['Count'] / counts['Count'].sum() * 100).round(1).astype(str) + '%'
+    
+    legend_attr = alt.Legend(orient="right", title=None) if show_legend else None
+    
+    if color_scale:
+        color_enc = alt.Color(field="Category", type="nominal", scale=color_scale, legend=legend_attr)
+    else:
+        color_enc = alt.Color(field="Category", type="nominal", legend=legend_attr)
+    
+    chart = alt.Chart(counts).mark_arc(innerRadius=40).encode(
+        theta=alt.Theta(field="Count", type="quantitative"),
+        color=color_enc,
+        tooltip=['Category', 'Count', 'Percent']
+    ).properties(title=title, height=height)
+    
+    return chart
+
 # ==========================================
 # MAIN APP
 # ==========================================
@@ -372,6 +419,22 @@ def main():
                     c2.metric("⚪ Rejected", int(total_series['REJECTED']))
                     c3.metric("🟢 Closed", int(total_series['CLOSED']))
                     
+                    # --- MATHURA-STYLE DOUGHNUT CHARTS (1 ROW LAYOUT WITH MASTER LEGEND) ---
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    st.markdown("##### 🍩 Category-wise Status Breakdown")
+                    
+                    # Single clean legend row rendered right above the charts
+                    st.markdown("<div style='text-align: center;'>🟠 <b>PENDING</b> &nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp; ⚪ <b>REJECTED</b> &nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp; 🟢 <b>CLOSED</b></div>", unsafe_allow_html=True)
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    
+                    valid_categories = [c for c in main_categories if c != "Unmapped Category"]
+                    if valid_categories:
+                        cols = st.columns(len(valid_categories))
+                        for idx, cat_name in enumerate(valid_categories):
+                            cat_df = df_processed[df_processed['MainCategory'] == cat_name]
+                            with cols[idx]:
+                                st.altair_chart(draw_doughnut(cat_df, f"{cat_name} Status", show_legend=False), use_container_width=True)
+                    
                     st.markdown("<br>", unsafe_allow_html=True)
                     st.markdown("##### 🚜 Citywide Aggregates")
                     m1, m2, m3 = st.columns(3)
@@ -413,6 +476,14 @@ def main():
             elif st.session_state.current_view == "Subcategory Drill-Down":
                 st.subheader("🔍 Subcategory Drill-Down")
                 
+                # Standard visually distinct color palette for subcategories
+                CATEGORY20 = [
+                    "#1f77b4", "#aec7e8", "#ff7f0e", "#ffbb78", "#2ca02c", "#98df8a", 
+                    "#d62728", "#ff9896", "#9467bd", "#c5b0d5", "#8c564b", "#c49c94", 
+                    "#e377c2", "#f7b6d2", "#7f7f7f", "#c7c7c5", "#bcbd22", "#dbdb8d", 
+                    "#17becf", "#9edae5"
+                ]
+                
                 if not main_categories:
                     st.warning("⚠️ No valid main categories found.")
                 else:
@@ -437,7 +508,38 @@ def main():
                     for tab, main_cat in zip(tabs, main_categories):
                         with tab:
                             sub_df = sub_view_df[sub_view_df['MainCategory'] == main_cat]
-                            if not sub_df.empty: display_with_fixed_footer(generate_pivot_summary(sub_df, 'Subcategory_Clean', f"{main_cat} Total"))
+                            if not sub_df.empty: 
+                                
+                                # Define a common color scale so subcategory colors strictly match across both charts
+                                unique_subs = sorted(sub_df['Subcategory_Clean'].dropna().unique().tolist())
+                                sub_colors = [CATEGORY20[i % len(CATEGORY20)] for i in range(len(unique_subs))]
+                                common_color_scale = alt.Scale(domain=unique_subs, range=sub_colors)
+                                
+                                # --- NEW: SUBCATEGORY CONTRIBUTION DOUGHNUTS ONLY ---
+                                st.markdown(f"###### 📊 Subcategory Contribution ({main_cat})")
+                                
+                                # Custom Master Legend centered across the top!
+                                legend_html = "<div style='display: flex; flex-wrap: wrap; justify-content: center; gap: 15px; margin-bottom: 10px; font-size: 14px;'>"
+                                for idx, sub_name in enumerate(unique_subs):
+                                    legend_html += f"<div><span style='color: {sub_colors[idx]}; font-size: 16px;'>●</span> {sub_name}</div>"
+                                legend_html += "</div>"
+                                st.markdown(legend_html, unsafe_allow_html=True)
+                                
+                                sc1, sc2 = st.columns(2)
+                                
+                                with sc1:
+                                    # Total Raised Contribution (Legend turned off)
+                                    st.altair_chart(draw_contribution_doughnut(sub_df, 'Subcategory_Clean', "Total Raised", show_legend=False, color_scale=common_color_scale), use_container_width=True)
+                                
+                                with sc2:
+                                    # Total Closed Contribution (Legend turned off so sizes match perfectly)
+                                    closed_sub_df = sub_df[sub_df['StatusBucket'] == 'CLOSED']
+                                    st.altair_chart(draw_contribution_doughnut(closed_sub_df, 'Subcategory_Clean', "Total Closed", show_legend=False, color_scale=common_color_scale), use_container_width=True)
+                                
+                                st.markdown("<br>", unsafe_allow_html=True)
+                                
+                                # Pivot Table at the bottom
+                                display_with_fixed_footer(generate_pivot_summary(sub_df, 'Subcategory_Clean', f"{main_cat} Total"))
                             else: st.info(f"No tickets found for {main_cat} in this date range.")
 
                 st.markdown("---")
@@ -509,7 +611,31 @@ def main():
                     st.markdown("##### 📍 Zone Comparison by Status & Closure Time")
                     b3_cat_all = st.selectbox("Select Main Category (For Zone Comparison)", main_categories, key="b3_cat_all")
                     zone_matrix_df = zone_view_df[zone_view_df['MainCategory'] == b3_cat_all]
-                    if not zone_matrix_df.empty: display_with_fixed_footer(generate_pivot_summary(zone_matrix_df, COL_ZONE, "ALL ZONES TOTAL", show_avg_time=True))
+                    
+                    if not zone_matrix_df.empty: 
+                        # --- NEW: MASTER LEGEND & 4-PER-ROW DOUGHNUTS ---
+                        st.markdown("<br>", unsafe_allow_html=True)
+                        st.markdown(f"###### 🍩 Zone-wise Status Breakdown ({b3_cat_all})")
+                        
+                        # Master Legend Row
+                        st.markdown("<div style='text-align: center;'>🟠 <b>PENDING</b> &nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp; ⚪ <b>REJECTED</b> &nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp; 🟢 <b>CLOSED</b></div>", unsafe_allow_html=True)
+                        st.markdown("<br>", unsafe_allow_html=True)
+                        
+                        valid_zones = sorted(zone_matrix_df[COL_ZONE].dropna().unique().tolist())
+                        
+                        # Loop through zones in chunks of 4
+                        for i in range(0, len(valid_zones), 4):
+                            z_cols = st.columns(4)
+                            for j in range(4):
+                                if i + j < len(valid_zones):
+                                    z_name = valid_zones[i+j]
+                                    z_df = zone_matrix_df[zone_matrix_df[COL_ZONE] == z_name]
+                                    with z_cols[j]:
+                                        # draw_doughnut handles the tooltips (count and %) automatically
+                                        st.altair_chart(draw_doughnut(z_df, f"Zone {z_name}", show_legend=False, height=220), use_container_width=True)
+                        
+                        st.markdown("<br>", unsafe_allow_html=True)
+                        display_with_fixed_footer(generate_pivot_summary(zone_matrix_df, COL_ZONE, "ALL ZONES TOTAL", show_avg_time=True))
                     else: st.info("No tickets found for this combination.")
                     
                     st.markdown("<br>", unsafe_allow_html=True)
@@ -529,87 +655,90 @@ def main():
                 st.subheader("🏆 Officer Leaderboard & Pendency Tracking")
                 st.caption("Live mappings pulled from Google Sheets.")
                 
-                unresolved_df = df_processed[df_processed['StatusBucket'].isin(UNRESOLVED_STATUSES)].copy()
-                ignore_list = ['Unassigned', 'Roster Unavailable', 'Column Missing']
-                
-                unmapped_df = unresolved_df[(unresolved_df['Supervisor'].isin(ignore_list)) & (unresolved_df['SFI/JE'].isin(ignore_list))]
-                unmapped_count = unmapped_df.shape[0]
-                
-                if unmapped_count > 0:
-                    st.error(f"⚠️ **{unmapped_count} unresolved tickets** could not be mapped to ANY officer. They are hidden from this leaderboard.")
-                    csv = unmapped_df.to_csv(index=False).encode('utf-8')
-                    st.download_button(label="⬇️ Download Unmapped Tickets (CSV)", data=csv, file_name=f"unmapped_tickets_{datetime.now().strftime('%Y%m%d')}.csv", mime="text/csv", type="secondary")
-                
-                sanitation_df = unresolved_df[unresolved_df['MainCategory'] == 'Sanitation']
-                eng_df = unresolved_df[unresolved_df['MainCategory'] == 'Engineering']
-                malba_df = unresolved_df[unresolved_df['MainCategory'] == 'Malba']
-                
-                st.markdown("### 🥇 Top & Bottom 5 Performers")
-                st.caption("Ranked by lowest and highest number of currently unresolved tickets.")
-                
-                t1, t2, t3 = st.tabs(["🧹 Sanitation", "🏗️ Engineering", "🚜 Malba"])
-                
-                def draw_leaderboard(df_to_use, group_col, role_label):
-                    clean_df = df_to_use[~df_to_use[group_col].isin(ignore_list)]
-                    if clean_df.empty:
-                        st.info(f"No unresolved tickets found for {role_label}s in this category.")
-                        return
+                if 'Supervisor' not in df_processed.columns or 'SFI/JE' not in df_processed.columns:
+                    st.warning("⚠️ Officer mapping columns not found. Check Google Sheet connectivity.")
+                else:
+                    unresolved_df = df_processed[df_processed['StatusBucket'].isin(UNRESOLVED_STATUSES)].copy()
+                    ignore_list = ['Unassigned', 'Roster Unavailable', 'Column Missing']
                     
-                    counts = clean_df.groupby(group_col).size().reset_index(name='Total Unresolved Tickets')
-                    counts = counts.sort_values('Total Unresolved Tickets', ascending=True).reset_index(drop=True)
-                    counts.columns = [f"{role_label} Name", 'Total Unresolved Tickets']
+                    unmapped_df = unresolved_df[(unresolved_df['Supervisor'].isin(ignore_list)) & (unresolved_df['SFI/JE'].isin(ignore_list))]
+                    unmapped_count = unmapped_df.shape[0]
                     
-                    c1, c2 = st.columns(2)
-                    with c1:
-                        st.success(f"🌟 Top 5 {role_label}s (Least Pendency)")
-                        top_5 = counts.head(5).copy()
-                        top_5.index = top_5.index + 1  
-                        st.dataframe(top_5, use_container_width=True)
-                    with c2:
-                        st.error(f"⚠️ Bottom 5 {role_label}s (Highest Pendency)")
-                        bottom_5 = counts.tail(5).sort_values('Total Unresolved Tickets', ascending=False).reset_index(drop=True)
-                        bottom_5.index = bottom_5.index + 1  
-                        st.dataframe(bottom_5, use_container_width=True)
-
-                with t1:
-                    st.markdown("##### 👷 Supervisors")
-                    draw_leaderboard(sanitation_df, 'Supervisor', 'Supervisor')
-                    st.markdown("<br>", unsafe_allow_html=True)
-                    st.markdown("##### 👔 SFIs")
-                    draw_leaderboard(sanitation_df, 'SFI/JE', 'SFI')
-                with t2:
-                    st.markdown("##### 👔 Junior Engineers (JEs)")
-                    draw_leaderboard(eng_df, 'SFI/JE', 'JE')
-                with t3:
-                    st.markdown("##### 👔 Junior Engineers (JEs)")
-                    draw_leaderboard(malba_df, 'SFI/JE', 'JE')
+                    if unmapped_count > 0:
+                        st.error(f"⚠️ **{unmapped_count} unresolved tickets** could not be mapped to ANY officer. They are hidden from this leaderboard.")
+                        csv = unmapped_df.to_csv(index=False).encode('utf-8')
+                        st.download_button(label="⬇️ Download Unmapped Tickets (CSV)", data=csv, file_name=f"unmapped_tickets_{datetime.now().strftime('%Y%m%d')}.csv", mime="text/csv", type="secondary")
                     
-                st.markdown("---")
-                st.markdown("### 🔍 Filtered Officer Pendency View")
-                
-                f1, f2, f3 = st.columns(3)
-                with f1: f_cat = st.selectbox("Category", ["All"] + main_categories)
-                with f2: f_zone = st.selectbox("Zone", ["All"] + sorted(df_processed[COL_ZONE].dropna().unique().tolist())) if COL_ZONE in df_processed.columns else "All"
-                with f3: role_type = st.radio("Select Role to Inspect", ["Supervisor", "SFI / JE"], horizontal=True)
-                
-                filt_df = unresolved_df.copy()
-                if f_cat != "All": filt_df = filt_df[filt_df['MainCategory'] == f_cat]
-                if f_zone != "All" and COL_ZONE in filt_df.columns: filt_df = filt_df[filt_df[COL_ZONE] == f_zone]
-                
-                target_col = 'Supervisor' if role_type == "Supervisor" else 'SFI/JE'
-                filt_df = filt_df[~filt_df[target_col].isin(ignore_list)]
-                
-                if not filt_df.empty:
-                    officer_list = ["All"] + sorted(filt_df[target_col].dropna().unique().tolist())
-                    f_officer = st.selectbox(f"Select Specific Officer", officer_list)
-                    if f_officer != "All": filt_df = filt_df[filt_df[target_col] == f_officer]
+                    sanitation_df = unresolved_df[unresolved_df['MainCategory'] == 'Sanitation']
+                    eng_df = unresolved_df[unresolved_df['MainCategory'] == 'Engineering']
+                    malba_df = unresolved_df[unresolved_df['MainCategory'] == 'Malba']
+                    
+                    st.markdown("### 🥇 Top & Bottom 5 Performers")
+                    st.caption("Ranked by lowest and highest number of currently unresolved tickets.")
+                    
+                    t1, t2, t3 = st.tabs(["🧹 Sanitation", "🏗️ Engineering", "🚜 Malba"])
+                    
+                    def draw_leaderboard(df_to_use, group_col, role_label):
+                        clean_df = df_to_use[~df_to_use[group_col].isin(ignore_list)]
+                        if clean_df.empty:
+                            st.info(f"No unresolved tickets found for {role_label}s in this category.")
+                            return
                         
-                    final_table = filt_df.groupby(target_col).size().reset_index(name='Total Unresolved Tickets')
-                    final_table = final_table.sort_values('Total Unresolved Tickets', ascending=False).reset_index(drop=True)
-                    final_table.columns = ['Officer Name', 'Total Unresolved Tickets']
-                    final_table.index = final_table.index + 1
-                    st.dataframe(final_table, use_container_width=True)
-                else: st.info("No unresolved tickets found matching those filters.")
+                        counts = clean_df.groupby(group_col).size().reset_index(name='Total Unresolved Tickets')
+                        counts = counts.sort_values('Total Unresolved Tickets', ascending=True).reset_index(drop=True)
+                        counts.columns = [f"{role_label} Name", 'Total Unresolved Tickets']
+                        
+                        c1, c2 = st.columns(2)
+                        with c1:
+                            st.success(f"🌟 Top 5 {role_label}s (Least Pendency)")
+                            top_5 = counts.head(5).copy()
+                            top_5.index = top_5.index + 1  
+                            st.dataframe(top_5, use_container_width=True)
+                        with c2:
+                            st.error(f"⚠️ Bottom 5 {role_label}s (Highest Pendency)")
+                            bottom_5 = counts.tail(5).sort_values('Total Unresolved Tickets', ascending=False).reset_index(drop=True)
+                            bottom_5.index = bottom_5.index + 1  
+                            st.dataframe(bottom_5, use_container_width=True)
+
+                    with t1:
+                        st.markdown("##### 👷 Supervisors")
+                        draw_leaderboard(sanitation_df, 'Supervisor', 'Supervisor')
+                        st.markdown("<br>", unsafe_allow_html=True)
+                        st.markdown("##### 👔 SFIs")
+                        draw_leaderboard(sanitation_df, 'SFI/JE', 'SFI')
+                    with t2:
+                        st.markdown("##### 👔 Junior Engineers (JEs)")
+                        draw_leaderboard(eng_df, 'SFI/JE', 'JE')
+                    with t3:
+                        st.markdown("##### 👔 Junior Engineers (JEs)")
+                        draw_leaderboard(malba_df, 'SFI/JE', 'JE')
+                        
+                    st.markdown("---")
+                    st.markdown("### 🔍 Filtered Officer Pendency View")
+                    
+                    f1, f2, f3 = st.columns(3)
+                    with f1: f_cat = st.selectbox("Category", ["All"] + main_categories)
+                    with f2: f_zone = st.selectbox("Zone", ["All"] + sorted(df_processed[COL_ZONE].dropna().unique().tolist())) if COL_ZONE in df_processed.columns else "All"
+                    with f3: role_type = st.radio("Select Role to Inspect", ["Supervisor", "SFI / JE"], horizontal=True)
+                    
+                    filt_df = unresolved_df.copy()
+                    if f_cat != "All": filt_df = filt_df[filt_df['MainCategory'] == f_cat]
+                    if f_zone != "All" and COL_ZONE in filt_df.columns: filt_df = filt_df[filt_df[COL_ZONE] == f_zone]
+                    
+                    target_col = 'Supervisor' if role_type == "Supervisor" else 'SFI/JE'
+                    filt_df = filt_df[~filt_df[target_col].isin(ignore_list)]
+                    
+                    if not filt_df.empty:
+                        officer_list = ["All"] + sorted(filt_df[target_col].dropna().unique().tolist())
+                        f_officer = st.selectbox(f"Select Specific Officer", officer_list)
+                        if f_officer != "All": filt_df = filt_df[filt_df[target_col] == f_officer]
+                            
+                        final_table = filt_df.groupby(target_col).size().reset_index(name='Total Unresolved Tickets')
+                        final_table = final_table.sort_values('Total Unresolved Tickets', ascending=False).reset_index(drop=True)
+                        final_table.columns = ['Officer Name', 'Total Unresolved Tickets']
+                        final_table.index = final_table.index + 1
+                        st.dataframe(final_table, use_container_width=True)
+                    else: st.info("No unresolved tickets found matching those filters.")
 
             # ==========================================
             # Age-wise Pendency
